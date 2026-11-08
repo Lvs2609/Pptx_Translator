@@ -1,0 +1,60 @@
+# =========================================================
+# BẢO MẬT KHÓA API & BIẾN MÔI TRƯỜNG (CRITICAL SECRETS)
+# =========================================================
+.env
+.env.*
+!.env.example
+
+# =========================================================
+# MÔI TRƯỜNG ẢO PYTHON (VIRTUAL ENVIRONMENTS)
+# =========================================================
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# =========================================================
+# CACHE & BYTECODE
+# =========================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.cache/
+.pytest_cache/
+.mypy_cache/
+
+# =========================================================
+# CƠ SỞ DỮ LIỆU & FILE XUẤT (BẢO VỆ DỮ LIỆU CÁ NHÂN)
+# =========================================================
+data/exports/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/daily_usage.json
+data/translation_memory.json
+data/translation_memory.md
+
+# =========================================================
+# FILE POWERPOINT ĐẦU RA (NGOẠI TRỪ FILE MẪU BAN ĐẦU)
+# =========================================================
+*.pptx
+!samples/sample_presentation.pptx
+
+# =========================================================
+# CẤU HÌNH STREAMLIT RIÊNG TƯ
+# =========================================================
+.streamlit/secrets.toml
+
+# =========================================================
+# CÔNG CỤ PHÁT TRIỂN & HỆ ĐIỀU HÀNH (IDE & OS)
+# =========================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
