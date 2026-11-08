@@ -1,9 +1,19 @@
 import io
+import importlib
 import os
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
 import streamlit as st
+
+# Tự động tải lại các module nội bộ để tránh lỗi stale cache khi cập nhật code
+for mod in ["src.services.memory_service", "src.services.db_service", "src.services.gemini_service", "src.ui.styles"]:
+    if mod in sys.modules:
+        try:
+            importlib.reload(sys.modules[mod])
+        except Exception:
+            pass
 
 from src.config import LANGS, AVAILABLE_MODELS, SAMPLE_PPTX
 from src.core.translator import translate_pptx
