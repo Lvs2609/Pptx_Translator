@@ -222,53 +222,35 @@ SINGLE_PAGE_CSS = """
     }
 
     /* =========================================================
-       6. BANNER MODEL ĐANG HOẠT ĐỘNG (SIDEBAR TOP)
+       6. BANNER MODEL ĐANG HOẠT ĐỘNG (CHỈ HIỆN KHI ĐÃ TEST API)
        ========================================================= */
     .active-model-card {
-        background: linear-gradient(135deg, rgba(2, 132, 199, 0.15) 0%, rgba(14, 165, 233, 0.06) 100%) !important;
-        border: 1px solid rgba(56, 189, 248, 0.5) !important;
-        border-radius: 12px !important;
-        padding: 10px 14px !important;
+        background-color: var(--secondary-background-color) !important;
+        border: 1px solid rgba(16, 185, 129, 0.45) !important;
+        border-radius: 10px !important;
+        padding: 8px 12px !important;
         margin-bottom: 12px !important;
-        box-shadow: 0 4px 14px rgba(2, 132, 199, 0.15) !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        box-shadow: 0 2px 8px rgba(16, 185, 129, 0.12) !important;
     }
-    .active-model-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 4px;
+    .active-model-name {
+        font-size: 0.90rem !important;
+        font-weight: 800 !important;
+        color: var(--text-color) !important;
+        font-family: 'JetBrains Mono', 'Fira Code', monospace !important;
+        letter-spacing: -0.01em !important;
     }
     .active-model-badge {
-        font-size: 0.68rem !important;
+        font-size: 0.72rem !important;
         font-weight: 700 !important;
         color: #10b981 !important;
-        background: rgba(16, 185, 129, 0.18) !important;
+        background: rgba(16, 185, 129, 0.15) !important;
         padding: 2px 8px !important;
         border-radius: 9999px !important;
         border: 1px solid rgba(16, 185, 129, 0.4) !important;
         letter-spacing: 0.04em !important;
-    }
-    .active-model-title {
-        font-size: 0.74rem !important;
-        font-weight: 700 !important;
-        color: var(--text-color) !important;
-        opacity: 0.8 !important;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-    }
-    .active-model-name {
-        font-size: 0.98rem !important;
-        font-weight: 800 !important;
-        color: #0284c7 !important;
-        font-family: 'JetBrains Mono', 'Fira Code', monospace !important;
-        letter-spacing: -0.01em !important;
-    }
-    .active-model-sub {
-        font-size: 0.72rem !important;
-        color: var(--text-color) !important;
-        opacity: 0.7 !important;
-        margin-top: 3px !important;
-        line-height: 1.3 !important;
     }
     .quota-active-tag {
         font-size: 0.65rem !important;

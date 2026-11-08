@@ -57,21 +57,19 @@ st.markdown(
 
 # ----------------- THANH BÊN (SIDEBAR) -----------------
 with st.sidebar:
-    # 🌟 GHI CHÚ MODEL ĐANG DÙNG (TOP SIDEBAR THEO YÊU CẦU ẢNH 1)
+    # 🌟 GHI CHÚ MODEL ĐANG DÙNG (CHỈ HIỆN KHI ĐÃ TEST API THÀNH CÔNG HOẶC ĐANG DỊCH)
+    is_online = st.session_state.get("is_llm_online", False)
     current_active = st.session_state.get("active_model", "gemini-3.5-flash")
-    st.markdown(
-        f"""
-        <div class="active-model-card">
-            <div class="active-model-header">
-                <span class="active-model-title">🤖 Model đang hoạt động</span>
+    if is_online:
+        st.markdown(
+            f"""
+            <div class="active-model-card">
+                <span class="active-model-name">🤖 {current_active}</span>
                 <span class="active-model-badge">ONLINE 🟢</span>
             </div>
-            <div class="active-model-name">⚡ {current_active}</div>
-            <div class="active-model-sub">Tự động chuyển model dự phòng nếu chạm giới hạn 429</div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+            """,
+            unsafe_allow_html=True
+        )
 
     st.markdown("### 🛠️ Cấu hình & Công cụ")
     default_key = os.getenv("GEMINI_API_KEY", "")
@@ -100,6 +98,7 @@ with st.sidebar:
         st.session_state["translated_data"] = None
         st.session_state["report_text"] = ""
         st.session_state["ping_results"] = None
+        st.session_state["is_llm_online"] = False
         st.rerun()
 
     if btn_ping:
@@ -107,7 +106,11 @@ with st.sidebar:
             st.error("❌ Chưa nhập API key!")
         else:
             with st.spinner("📡 Đang kiểm tra quota & thời gian reset..."):
-                st.session_state["ping_results"] = ping_test_models(api_key.strip())
+                ping_res = ping_test_models(api_key.strip())
+                st.session_state["ping_results"] = ping_res
+                # Bật trạng thái Online nếu API key hợp lệ
+                if any(r.get("status") in ("OK", "QUOTA_EXCEEDED") for r in ping_res):
+                    st.session_state["is_llm_online"] = True
             st.rerun()
 
     # HIỂN THỊ CHI TIẾT QUOTA VÀ THỜI GIAN RESET
@@ -365,6 +368,7 @@ with col_right:
     if btn_translate:
         st.session_state["live_logs"] = []
         st.session_state["translated_data"] = None
+        st.session_state["is_llm_online"] = True
         render_logs(f"🚀 Bắt đầu tiếp nhận tệp: {uploaded_file.name}")
         
         def ui_progress(p, msg):
