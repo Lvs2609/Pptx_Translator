@@ -58,11 +58,19 @@ st.markdown(
 # ----------------- THANH BÊN (SIDEBAR) -----------------
 with st.sidebar:
     st.markdown("### 🛠️ Cấu hình & Công cụ")
+    default_key = os.getenv("GEMINI_API_KEY", "")
+    if not default_key:
+        try:
+            if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
+                default_key = st.secrets["GEMINI_API_KEY"]
+        except Exception:
+            pass
+
     api_key = st.text_input(
         "🔑 Gemini API Key", 
-        value=os.getenv("GEMINI_API_KEY", ""), 
+        value=default_key, 
         type="password",
-        help="Đã tự động nạp từ file .env"
+        help="Tự động nạp từ file .env (máy tính) hoặc Streamlit Secrets (khi deploy Cloud)"
     )
 
     col_btn1, col_btn2 = st.columns(2)
