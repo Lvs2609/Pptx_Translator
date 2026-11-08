@@ -133,6 +133,7 @@ class GeminiTranslator:
                  log_func: Optional[Callable[[str], None]] = None):
         self.client = genai.Client(api_key=api_key)
         self.model = model
+        self.active_model = model  # Theo dõi chính xác model đang thực tế xử lý
         self.retries = retries
         self.log_func = log_func or (lambda m: None)
 
@@ -142,12 +143,18 @@ class GeminiTranslator:
         except Exception:
             pass
 
-    def translate(self, items: dict[str, str], target: str, glossary=None, context=""):
-        name = LANGS[target][0]
+    def translate(self, items: dict[str, str], target: str, glossary=None, context="", source_lang: str = "auto"):
+        target_name = LANGS[target][0]
+        if source_lang != "auto" and source_lang in LANGS:
+            src_name = LANGS[source_lang][0]
+            target_directive = f"{target_name} (Dịch từ: {src_name})"
+        else:
+            target_directive = target_name
+
         gl = ""
         if glossary:
             gl = "GLOSSARY (always use these translations):\n" + "\n".join(f"- {k} => {v}" for k, v in glossary.items())
-        system = SYSTEM.format(target=name, glossary=gl, context=f"CONTEXT: {context}" if context else "")
+        system = SYSTEM.format(target=target_directive, glossary=gl, context=f"CONTEXT: {context}" if context else "")
         payload = json.dumps([{"id": k, "text": v} for k, v in items.items()], ensure_ascii=False)
         cfg = types.GenerateContentConfig(system_instruction=system, temperature=0.2,
                                           response_mime_type="application/json")
@@ -155,6 +162,7 @@ class GeminiTranslator:
         models_to_try = [self.model] + [m for m in FALLBACK_MODELS if m != self.model]
 
         for m in models_to_try:
+            self.active_model = m
             for attempt in range(self.retries):
                 try:
                     self.log(f"🌐 Đang gửi {len(items)} đoạn tới Gemini ({m})...")

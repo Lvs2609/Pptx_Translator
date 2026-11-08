@@ -12,6 +12,7 @@ from src.services.gemini_service import GeminiTranslator, load_glossary
 def main():
     ap = argparse.ArgumentParser(description="Dịch PPTX giữ nguyên định dạng (Gemini AI)")
     ap.add_argument("input", help="Đường dẫn file .pptx cần dịch")
+    ap.add_argument("-s", "--source", default="auto", help="Ngôn ngữ gốc (mặc định: auto)")
     ap.add_argument("-t", "--target", choices=LANGS, required=True, help="Ngôn ngữ đích")
     ap.add_argument("-o", "--output", help="Đường dẫn file xuất ra")
     ap.add_argument("--model", default="gemini-3.5-flash", help="Mã model Gemini AI")
@@ -33,6 +34,7 @@ def main():
         dst=out,
         target=a.target,
         translator=GeminiTranslator(key, a.model),
+        source_lang=a.source,
         glossary=gl,
         fit=not a.no_fit,
         min_scale=a.min_scale,

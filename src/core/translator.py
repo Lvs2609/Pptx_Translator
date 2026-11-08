@@ -37,6 +37,7 @@ def _batches(keys, max_chars, max_items):
 
 
 def translate_all(tr: Translator, sources: list[str], target: str, glossary, context,
+                  source_lang: str = "auto",
                   max_chars=6000, max_items=50, workers=4, progress=None, log_func=None,
                   use_cache=True, rate_delay=0.3):
     """Xử lý dịch toàn bộ các đoạn văn bản (kết hợp bộ nhớ song ngữ và Gemini AI)."""
@@ -73,7 +74,7 @@ def translate_all(tr: Translator, sources: list[str], target: str, glossary, con
         if rate_delay > 0:
             time.sleep(rate_delay)
         items = {str(i): s for i, s in enumerate(batch)}
-        out = tr.translate(items, target, glossary, context)
+        out = tr.translate(items, target, glossary, context, source_lang=source_lang)
         res = {}
         for i, s in enumerate(batch):
             d = out.get(str(i))
@@ -103,13 +104,13 @@ def translate_all(tr: Translator, sources: list[str], target: str, glossary, con
             progress(0.86, f"Đang tinh chỉnh {len(failed_sources)} đoạn...")
         for idx, s in enumerate(failed_sources, 1):
             for _ in range(2):
-                d = tr.translate({"0": s}, target, glossary, context).get("0")
+                d = tr.translate({"0": s}, target, glossary, context, source_lang=source_lang).get("0")
                 if d is not None and valid(s, d):
                     result[s] = d
                     break
             else:
                 flat = STYLE_TAG_RE.sub("", s)
-                d = tr.translate({"0": flat}, target, glossary, context).get("0") or flat
+                d = tr.translate({"0": flat}, target, glossary, context, source_lang=source_lang).get("0") or flat
                 result[s] = d if valid(flat, d, style=False) else flat
                 degraded.add(s)
             if progress:
@@ -125,8 +126,8 @@ def translate_all(tr: Translator, sources: list[str], target: str, glossary, con
     return result, degraded, cached_count
 
 
-def translate_pptx(src, dst, target, translator: Translator, glossary=None, fit=True,
-                   min_scale=0.65, include_layouts=True,
+def translate_pptx(src, dst, target, translator: Translator, source_lang: str = "auto",
+                   glossary=None, fit=True, min_scale=0.65, include_layouts=True,
                    progress: Callable[[float, str], None] | None = None,
                    log_func: Callable[[str], None] | None = None,
                    use_cache=True, batch_size=50, rate_delay=0.3) -> Report:
@@ -148,13 +149,16 @@ def translate_pptx(src, dst, target, translator: Translator, glossary=None, fit=
 
     uniq = list(dict.fromkeys(u.tagged for u in units))
     rep.unique = len(uniq)
-    _log(f"📊 Tìm thấy {len(units)} đoạn văn ({rep.unique} đoạn duy nhất sau khi lọc trùng).")
+    src_label = "Tự động nhận diện" if source_lang == "auto" else LANGS.get(source_lang, (source_lang,))[0]
+    dst_label = LANGS[target][0]
+    _log(f"📊 Tìm thấy {len(units)} đoạn văn ({rep.unique} đoạn duy nhất sau khi lọc trùng). Hướng dịch: {src_label} ➔ {dst_label}")
     first = " | ".join(u.plain.strip().replace("\n", " ") for u in units[:5])
     context = f"Deck bắt đầu bằng: {first[:400]}"
     if progress:
         progress(0.10, f"Đã quét {num_slides} slide ({len(units)} đoạn văn, {rep.unique} đoạn duy nhất). Đang kết nối Gemini AI...")
     trans, degraded, cached_count = translate_all(
         translator, uniq, target, glossary, context,
+        source_lang=source_lang,
         max_items=batch_size, rate_delay=rate_delay, use_cache=use_cache,
         progress=progress, log_func=log_func
     )

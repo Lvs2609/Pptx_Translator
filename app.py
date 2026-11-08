@@ -57,6 +57,22 @@ st.markdown(
 
 # ----------------- THANH BÊN (SIDEBAR) -----------------
 with st.sidebar:
+    # 🌟 GHI CHÚ MODEL ĐANG DÙNG (TOP SIDEBAR THEO YÊU CẦU ẢNH 1)
+    current_active = st.session_state.get("active_model", "gemini-3.5-flash")
+    st.markdown(
+        f"""
+        <div class="active-model-card">
+            <div class="active-model-header">
+                <span class="active-model-title">🤖 Model đang hoạt động</span>
+                <span class="active-model-badge">ONLINE 🟢</span>
+            </div>
+            <div class="active-model-name">⚡ {current_active}</div>
+            <div class="active-model-sub">Tự động chuyển model dự phòng nếu chạm giới hạn 429</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
     st.markdown("### 🛠️ Cấu hình & Công cụ")
     default_key = os.getenv("GEMINI_API_KEY", "")
     if not default_key:
@@ -113,11 +129,12 @@ with st.sidebar:
                 badge_cls = r.get("badge_class", "ready")
                 pct_val = r.get("pct", 0)
                 fill_cls = "fill-warn" if r.get("status") == "QUOTA_EXCEEDED" else "fill-ok"
+                active_tag = '<span class="quota-active-tag">⭐ ĐANG DÙNG</span>' if model_name == current_active else ''
                 
                 card_html = f"""
                 <div class="quota-card {card_cls}">
                     <div class="quota-header-row">
-                        <span class="quota-model-name">🤖 {model_name}</span>
+                        <span class="quota-model-name">🤖 {model_name}{active_tag}</span>
                         <span class="quota-ping-pill">⚡ {ping_val}ms</span>
                     </div>
                     <div class="quota-detail-line">📊 {usage_txt}</div>
@@ -134,6 +151,9 @@ with st.sidebar:
 
     model_choice = st.selectbox("🤖 Model LLM Ưu Tiên", AVAILABLE_MODELS, index=0)
     model = st.text_input("Tên Model", "gemini-3.5-flash") if model_choice == "Tùy chỉnh khác..." else model_choice
+    if st.session_state.get("selected_model") != model:
+        st.session_state["selected_model"] = model
+        st.session_state["active_model"] = model
 
     st.markdown("---")
     st.markdown("### 📚 Bộ nhớ Song ngữ (TM)")
@@ -189,11 +209,37 @@ with col_left:
     if uploaded_file:
         st.success(f"📄 **{uploaded_file.name}** ({len(uploaded_file.getvalue())/1024:.1f} KB)")
 
-    target_lang = st.selectbox(
-        "🌐 Ngôn ngữ muốn dịch sang:",
-        options=list(LANGS.keys()),
-        format_func=lambda k: f"{LANGS[k][0]} ({k})"
+    # 🌐 CHỌN NGÔN NGỮ GỐC VÀ NGÔN NGỮ ĐÍCH (THEO YÊU CẦU ẢNH 2)
+    col_l1, col_l2 = st.columns(2, gap="small")
+    with col_l1:
+        source_options = ["auto"] + list(LANGS.keys())
+        source_lang = st.selectbox(
+            "🔤 Ngôn ngữ gốc (Source):",
+            options=source_options,
+            format_func=lambda k: "🌐 Tự động nhận diện" if k == "auto" else f"{LANGS[k][0]} ({k})",
+            index=0,
+            help="Chọn ngôn ngữ gốc của bài thuyết trình hoặc để AI tự động nhận diện"
+        )
+    with col_l2:
+        default_target_idx = 0 if source_lang != "vi" else 1
+        target_lang = st.selectbox(
+            "🎯 Ngôn ngữ dịch sang (Target):",
+            options=list(LANGS.keys()),
+            format_func=lambda k: f"{LANGS[k][0]} ({k})",
+            index=default_target_idx,
+            help="Chọn ngôn ngữ bạn muốn dịch bài thuyết trình sang"
+        )
+
+    src_label = "Tự động nhận diện" if source_lang == "auto" else LANGS[source_lang][0]
+    dst_label = LANGS[target_lang][0]
+    st.markdown(
+        f'<div style="font-size: 0.8rem; color: var(--text-color); opacity: 0.82; margin: -4px 0 8px 0;">'
+        f'🧭 Hướng dịch: <b>{src_label}</b> ➔ <b>{dst_label}</b>'
+        f'</div>',
+        unsafe_allow_html=True
     )
+    if source_lang == target_lang and source_lang != "auto":
+        st.warning("⚠️ Ngôn ngữ gốc và ngôn ngữ đích đang trùng nhau!")
 
     with st.expander("📖 Bảng thuật ngữ tùy biến (Glossary)"):
         gl_text = st.text_area("Mỗi dòng: `thuật ngữ = bản dịch`", placeholder="API = Giao diện lập trình", height=60, label_visibility="collapsed")
@@ -345,6 +391,7 @@ with col_right:
                     dst=dst_path,
                     target=target_lang,
                     translator=translator,
+                    source_lang=source_lang,
                     glossary=glossary,
                     fit=fit,
                     min_scale=min_scale,
@@ -355,6 +402,9 @@ with col_right:
                     batch_size=batch_size,
                     rate_delay=rate_delay
                 )
+                
+                # Cập nhật model thực tế đã xử lý hoàn tất
+                st.session_state["active_model"] = getattr(translator, "active_model", model)
                 
                 with open(dst_path, "rb") as f_res:
                     st.session_state["translated_data"] = f_res.read()
