@@ -191,42 +191,17 @@ class GeminiTranslator:
 
 
 def ping_test_models(api_key: str) -> list[dict]:
-    """Kiểm tra khóa API và các model Gemini siêu tốc (< 0.5s)."""
+    """Kiểm tra độ trễ, số lượt đã dùng/còn lại và thời gian reset của từng model Gemini (Chạy song song siêu tốc)."""
     clean_key = (api_key or "").strip()
     if not clean_key:
         return []
 
-    # 1. Kiểm tra nhanh định dạng & độ dài: Khóa Google AI Studio chuẩn luôn bắt đầu bằng 'AIza' và dài ít nhất 30 ký tự
-    if not clean_key.startswith("AIza") or len(clean_key) < 30:
-        return [{
-            "model": "All",
-            "status": "UNAUTHENTICATED",
-            "error_message": "Khóa API không đúng định dạng. Khóa Google AI Studio chuẩn phải bắt đầu bằng 'AIzaSy...' và có 39 ký tự. Vui lòng lấy lại khóa tại aistudio.google.com/apikey."
-        }]
-
-    # 2. Tạo client với attempts=1 để không bao giờ bị trễ retry
+    # Sử dụng attempts=1 để kiểm tra cực nhanh, không bị trễ retry
     http_opts = types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1))
     client = genai.Client(api_key=clean_key, http_options=http_opts)
     test_models = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]
-
-    # 3. Probe nhanh trên 1 model với 1 token duy nhất để xác thực khóa trong ~0.2s
-    # Nếu sai khóa thì dừng ngay lập tức, không ping các model còn lại
-    try:
-        client.models.generate_content(
-            model="gemini-3.5-flash-lite",
-            contents="ping",
-            config=types.GenerateContentConfig(max_output_tokens=1)
-        )
-    except Exception as e:
-        err = str(e)
-        if any(kw in err for kw in ["API_KEY_INVALID", "API key not valid", "400", "401", "UNAUTHENTICATED", "PERMISSION_DENIED"]):
-            return [{
-                "model": "All",
-                "status": "UNAUTHENTICATED",
-                "error_message": "Khóa API không hợp lệ hoặc đã bị vô hiệu hóa trên Google AI Studio. Vui lòng kiểm tra lại khóa tại aistudio.google.com/apikey (bắt đầu bằng AIzaSy...)."
-            }]
-
-    # 4. Tính thời gian reset định kỳ hàng ngày (14:00 giờ Việt Nam)
+    
+    # Tính thời gian reset định kỳ hàng ngày (14:00 giờ Việt Nam)
     now = datetime.now()
     reset_today = now.replace(hour=14, minute=0, second=0, microsecond=0)
     if now >= reset_today:
@@ -274,6 +249,7 @@ def ping_test_models(api_key: str) -> list[dict]:
                 limit = int(limit_match.group(1)) if limit_match else MODEL_LIMITS_NUM.get(m, 20)
                 record_api_usage(m, is_429=True)
                 
+                # Trích xuất số giây retryDelay nếu có
                 sec_match = re.search(r"'retryDelay': '(\d+)s'", err)
                 retry_match = re.search(r"retry in ([0-9]+h[0-9]+m|[0-9]+m[0-9]+s|[0-9]+h|[0-9]+m|[0-9]+s|\d+\.?\d*s)", err, re.I)
                 if sec_match:
@@ -302,6 +278,38 @@ def ping_test_models(api_key: str) -> list[dict]:
                     "card_class": "quota-card-warn",
                     "badge_class": "warn"
                 }
+            elif "401" in err or "UNAUTHENTICATED" in err or "API key not valid" in err or "API_KEY_INVALID" in err:
+                return {
+                    "model": m,
+                    "status": "UNAUTHENTICATED",
+                    "ping": elapsed_ms,
+                    "used": 0,
+                    "remaining": 0,
+                    "limit": 0,
+                    "pct": 100,
+                    "quota": "Sai Khóa API",
+                    "usage_text": "API Key không hợp lệ (401)",
+                    "state": "🔴 Sai khóa API (UNAUTHENTICATED)",
+                    "reset": "Vui lòng kiểm tra lại API Key",
+                    "card_class": "quota-card-err",
+                    "badge_class": "err"
+                }
+            elif "404" in err or "NOT_FOUND" in err:
+                return {
+                    "model": m,
+                    "status": "NOT_AVAILABLE",
+                    "ping": elapsed_ms,
+                    "used": 0,
+                    "remaining": 0,
+                    "limit": 0,
+                    "pct": 100,
+                    "quota": "Đã ngừng cung cấp",
+                    "usage_text": "Model không khả dụng trên API này",
+                    "state": "🔴 Không khả dụng (404)",
+                    "reset": "Google đã thay thế bằng model mới hơn",
+                    "card_class": "quota-card-err",
+                    "badge_class": "err"
+                }
             else:
                 return {
                     "model": m,
@@ -310,11 +318,11 @@ def ping_test_models(api_key: str) -> list[dict]:
                     "used": 0,
                     "remaining": 0,
                     "limit": 0,
-                    "pct": 0,
+                    "pct": 100,
                     "quota": "Lỗi kết nối",
-                    "usage_text": "Không thể kiểm tra hạn mức",
-                    "state": f"🔴 Lỗi: {e.__class__.__name__}",
-                    "reset": "Kiểm tra lại kết nối mạng hoặc API key",
+                    "usage_text": f"Lỗi: {err[:60]}...",
+                    "state": f"🔴 Lỗi: {err[:40]}",
+                    "reset": "Vui lòng kiểm tra lại đường truyền hoặc API Key",
                     "card_class": "quota-card-err",
                     "badge_class": "err"
                 }
@@ -345,6 +353,7 @@ def ping_test_models(api_key: str) -> list[dict]:
                     "badge_class": "err"
                 }
 
+    # Trả về theo đúng thứ tự ưu tiên
     return [results_map[m] for m in test_models if m in results_map]
 
 
