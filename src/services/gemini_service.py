@@ -183,13 +183,27 @@ class GeminiTranslator:
 
 
 def ping_test_models(api_key: str) -> list[dict]:
-    """Kiểm tra độ trễ, số lượt đã dùng/còn lại và thời gian reset của từng model Gemini."""
-    client = genai.Client(api_key=api_key)
-    results = []
+    """Kiểm tra độ trễ, số lượt đã dùng/còn lại và thời gian reset của từng model Gemini (Chạy song song siêu tốc)."""
+    clean_key = (api_key or "").strip()
+    if not clean_key:
+        return []
+
+    client = genai.Client(api_key=clean_key)
+    test_models = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
     
-    test_models = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]
-    
-    for m in test_models:
+    # Tính thời gian reset định kỳ hàng ngày (14:00 giờ Việt Nam)
+    now = datetime.now()
+    reset_today = now.replace(hour=14, minute=0, second=0, microsecond=0)
+    if now >= reset_today:
+        reset_target = reset_today + timedelta(days=1)
+    else:
+        reset_target = reset_today
+    diff = reset_target - now
+    hours, remainder = divmod(int(diff.total_seconds()), 3600)
+    minutes, _ = divmod(remainder, 60)
+    default_reset_str = f"Tự động làm mới sau ~{hours}h{minutes:02d}m (lúc 14:00 hàng ngày)"
+
+    def check_model(m: str) -> dict:
         t0 = time.time()
         try:
             resp = client.models.generate_content(model=m, contents="ping")
@@ -197,18 +211,7 @@ def ping_test_models(api_key: str) -> list[dict]:
             used, remaining, limit = get_usage_stats(m)
             pct = min(100, int((used / limit) * 100)) if limit else 0
             
-            # Tính thời gian reset định kỳ hàng ngày (14:00 giờ Việt Nam)
-            now = datetime.now()
-            reset_today = now.replace(hour=14, minute=0, second=0, microsecond=0)
-            if now >= reset_today:
-                reset_target = reset_today + timedelta(days=1)
-            else:
-                reset_target = reset_today
-            diff = reset_target - now
-            hours, remainder = divmod(int(diff.total_seconds()), 3600)
-            minutes, _ = divmod(remainder, 60)
-            
-            results.append({
+            return {
                 "model": m,
                 "status": "OK",
                 "ping": elapsed_ms,
@@ -219,61 +222,66 @@ def ping_test_models(api_key: str) -> list[dict]:
                 "quota": f"{limit:,} lượt/ngày • 15 lượt/phút",
                 "usage_text": f"Đã dùng: <b>{used}</b>/{limit} lượt • Còn lại: <b>{remaining:,}</b> lượt",
                 "state": "🟢 Sẵn sàng (Còn quota)",
-                "reset": f"Tự động làm mới sau ~{hours}h{minutes:02d}m (lúc 14:00 hàng ngày)",
+                "reset": default_reset_str,
                 "card_class": "quota-card-ok",
                 "badge_class": "ready"
-            })
+            }
         except Exception as e:
             elapsed_ms = int((time.time() - t0) * 1000)
             err = str(e)
             if "429" in err or "RESOURCE_EXHAUSTED" in err:
                 status = "QUOTA_EXCEEDED"
-                # Trích xuất limit thực tế từ thông báo của Google
                 limit_match = re.search(r"limit:\s*(\d+)", err) or re.search(r"'quotaValue':\s*'(\d+)'", err)
-                if limit_match:
-                    limit = int(limit_match.group(1))
-                else:
-                    limit = MODEL_LIMITS_NUM.get(m, 20)
-                
+                limit = int(limit_match.group(1)) if limit_match else MODEL_LIMITS_NUM.get(m, 20)
                 record_api_usage(m, is_429=True)
-                used = limit
-                remaining = 0
-                pct = 100
-                
-                # Trích xuất thời gian retry của Google
-                retry_match = re.search(r"retry in ([0-9]+h[0-9]+m|[0-9]+m[0-9]+s|[0-9]+h|[0-9]+m|[0-9]+s|\d+\.?\d*s)", err, re.I)
-                retry_str = retry_match.group(1) if retry_match else ""
                 
                 # Trích xuất số giây retryDelay nếu có
                 sec_match = re.search(r"'retryDelay': '(\d+)s'", err)
+                retry_match = re.search(r"retry in ([0-9]+h[0-9]+m|[0-9]+m[0-9]+s|[0-9]+h|[0-9]+m|[0-9]+s|\d+\.?\d*s)", err, re.I)
                 if sec_match:
                     secs = int(sec_match.group(1))
                     h, rem = divmod(secs, 3600)
                     minu, _ = divmod(rem, 60)
                     reset_time_str = (datetime.now() + timedelta(seconds=secs)).strftime("%H:%M:%S")
                     reset_msg = f"Mở lại sau: {h} giờ {minu} phút (vào lúc {reset_time_str})"
-                elif retry_str:
-                    reset_msg = f"Google báo mở lại sau: {retry_str}"
+                elif retry_match:
+                    reset_msg = f"Google báo mở lại sau: {retry_match.group(1)}"
                 else:
-                    reset_msg = "Sẽ tự động mở lại sau chu kỳ reset 14:00 hàng ngày"
+                    reset_msg = default_reset_str
                     
-                results.append({
+                return {
                     "model": m,
                     "status": status,
                     "ping": elapsed_ms,
-                    "used": used,
+                    "used": limit,
                     "remaining": 0,
                     "limit": limit,
                     "pct": 100,
                     "quota": f"{limit:,} lượt/ngày (Đã hết)",
-                    "usage_text": f"Đã dùng: <b>{used}</b>/{limit} (Hết quota) • Còn lại: <b>0</b> lượt",
+                    "usage_text": f"Đã dùng: <b>{limit}</b>/{limit} (Hết quota) • Còn lại: <b>0</b> lượt",
                     "state": "🟡 Hết quota trong ngày (429)",
                     "reset": reset_msg,
                     "card_class": "quota-card-warn",
                     "badge_class": "warn"
-                })
+                }
+            elif "401" in err or "UNAUTHENTICATED" in err or "API key not valid" in err:
+                return {
+                    "model": m,
+                    "status": "UNAUTHENTICATED",
+                    "ping": elapsed_ms,
+                    "used": 0,
+                    "remaining": 0,
+                    "limit": 0,
+                    "pct": 100,
+                    "quota": "Sai Khóa API",
+                    "usage_text": "API Key không hợp lệ (401)",
+                    "state": "🔴 Sai khóa API (UNAUTHENTICATED)",
+                    "reset": "Vui lòng lấy API Key chuẩn từ aistudio.google.com (bắt đầu bằng AIzaSy...)",
+                    "card_class": "quota-card-err",
+                    "badge_class": "err"
+                }
             elif "404" in err or "NOT_FOUND" in err:
-                results.append({
+                return {
                     "model": m,
                     "status": "NOT_AVAILABLE",
                     "ping": elapsed_ms,
@@ -287,9 +295,9 @@ def ping_test_models(api_key: str) -> list[dict]:
                     "reset": "Google đã thay thế bằng model mới hơn",
                     "card_class": "quota-card-err",
                     "badge_class": "err"
-                })
+                }
             else:
-                results.append({
+                return {
                     "model": m,
                     "status": "ERROR",
                     "ping": elapsed_ms,
@@ -300,11 +308,39 @@ def ping_test_models(api_key: str) -> list[dict]:
                     "quota": "Lỗi kết nối",
                     "usage_text": "Không thể kiểm tra hạn mức",
                     "state": f"🔴 Lỗi: {e.__class__.__name__}",
-                    "reset": "Kiểm tra lại kết nối mạng",
+                    "reset": "Kiểm tra lại kết nối mạng hoặc API key",
                     "card_class": "quota-card-err",
                     "badge_class": "err"
-                })
-    return results
+                }
+
+    # Chạy song song cả 3 model với ThreadPoolExecutor (nhanh gấp 3 lần)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(check_model, m): m for m in test_models}
+        results_map = {}
+        for future in futures:
+            m = futures[future]
+            try:
+                results_map[m] = future.result()
+            except Exception:
+                results_map[m] = {
+                    "model": m,
+                    "status": "ERROR",
+                    "ping": 0,
+                    "used": 0,
+                    "remaining": 0,
+                    "limit": 0,
+                    "pct": 0,
+                    "quota": "Lỗi kiểm tra",
+                    "usage_text": "Timeout hoặc lỗi kết nối",
+                    "state": "🔴 Lỗi kết nối",
+                    "reset": "Vui lòng thử lại",
+                    "card_class": "quota-card-err",
+                    "badge_class": "err"
+                }
+
+    # Trả về theo đúng thứ tự ưu tiên
+    return [results_map[m] for m in test_models if m in results_map]
 
 
 def load_glossary(text: str) -> dict[str, str]:

@@ -87,11 +87,12 @@ with st.sidebar:
         st.rerun()
 
     if btn_ping:
-        if not api_key:
-            st.error("❌ Chưa có API key!")
+        if not api_key or not api_key.strip():
+            st.error("❌ Chưa nhập API key!")
         else:
-            with st.status("📡 Đang kiểm tra quota & thời gian reset..."):
-                st.session_state["ping_results"] = ping_test_models(api_key)
+            with st.spinner("📡 Đang kiểm tra quota & thời gian reset..."):
+                st.session_state["ping_results"] = ping_test_models(api_key.strip())
+            st.rerun()
 
     # HIỂN THỊ CHI TIẾT QUOTA VÀ THỜI GIAN RESET
     if st.session_state.get("ping_results"):
