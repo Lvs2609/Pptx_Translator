@@ -189,7 +189,7 @@ def ping_test_models(api_key: str) -> list[dict]:
         return []
 
     client = genai.Client(api_key=clean_key)
-    test_models = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+    test_models = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]
     
     # Tính thời gian reset định kỳ hàng ngày (14:00 giờ Việt Nam)
     now = datetime.now()
@@ -313,9 +313,9 @@ def ping_test_models(api_key: str) -> list[dict]:
                     "badge_class": "err"
                 }
 
-    # Chạy song song cả 3 model với ThreadPoolExecutor (nhanh gấp 3 lần)
+    # Chạy song song cả 4 model với ThreadPoolExecutor (nhanh vượt trội)
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(check_model, m): m for m in test_models}
         results_map = {}
         for future in futures:
