@@ -185,39 +185,62 @@ SINGLE_PAGE_CSS = """
     }
 
     .task-item-card {
-        font-size: 0.85rem !important;
+        font-size: 0.80rem !important;
         color: var(--text-color) !important;
-        line-height: 1.4 !important;
-        padding: 2px 0 !important;
+        line-height: 1.3 !important;
+        padding: 1px 0 !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
+    .task-file-title {
+        font-weight: 700 !important;
+        font-size: 0.82rem !important;
+        display: inline-block !important;
+        max-width: 65% !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        vertical-align: middle !important;
     }
     .task-size-tag {
-        font-size: 0.72rem !important;
+        font-size: 0.68rem !important;
         font-weight: 600 !important;
-        padding: 1px 6px !important;
+        padding: 1px 5px !important;
         border-radius: 4px !important;
         background-color: rgba(56, 189, 248, 0.15) !important;
         color: #0284c7 !important;
         margin-left: 4px !important;
     }
+    .new-task-pill {
+        font-size: 0.62rem !important;
+        font-weight: 800 !important;
+        padding: 1px 5px !important;
+        border-radius: 4px !important;
+        background: #10b981 !important;
+        color: #ffffff !important;
+        margin-left: 4px !important;
+        vertical-align: middle !important;
+    }
 
     div[data-testid="stDownloadButton"] button {
         background: linear-gradient(135deg, #059669 0%, #10b981 100%) !important;
         color: #ffffff !important;
-        font-size: 0.82rem !important;
+        font-size: 0.74rem !important;
         font-weight: 700 !important;
-        padding: 0.35rem 0.85rem !important;
-        border-radius: 8px !important;
+        padding: 0.15rem 0.5rem !important;
+        border-radius: 6px !important;
         border: 1px solid #34d399 !important;
-        box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3) !important;
-        transition: all 0.2s ease-in-out !important;
+        box-shadow: 0 1px 4px rgba(16, 185, 129, 0.25) !important;
+        transition: all 0.15s ease-in-out !important;
         width: 100% !important;
-        min-height: 33px !important;
-        height: 33px !important;
+        min-height: 27px !important;
+        height: 27px !important;
+        line-height: 1 !important;
         margin: 0 !important;
     }
     div[data-testid="stDownloadButton"] button:hover {
         background: linear-gradient(135deg, #10b981 0%, #34d399 100%) !important;
-        box-shadow: 0 4px 14px rgba(16, 185, 129, 0.5) !important;
+        box-shadow: 0 2px 8px rgba(16, 185, 129, 0.4) !important;
         transform: translateY(-1px) !important;
     }
 

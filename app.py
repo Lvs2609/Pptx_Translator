@@ -98,20 +98,36 @@ with st.sidebar:
         st.session_state["translated_data"] = None
         st.session_state["report_text"] = ""
         st.session_state["ping_results"] = None
+        st.session_state["api_error_alert"] = None
         st.session_state["is_llm_online"] = False
         st.rerun()
 
     if btn_ping:
+        st.session_state["api_error_alert"] = None
         if not api_key or not api_key.strip():
-            st.error("❌ Chưa nhập API key!")
+            st.session_state["api_error_alert"] = "❌ Chưa nhập API key! Vui lòng dán khóa Gemini API vào ô phía trên."
+            st.session_state["ping_results"] = None
+            st.session_state["is_llm_online"] = False
         else:
-            with st.spinner("📡 Đang kiểm tra quota & thời gian reset..."):
+            with st.spinner("⚡ Đang kiểm tra kết nối API..."):
                 ping_res = ping_test_models(api_key.strip())
-                st.session_state["ping_results"] = ping_res
-                # Bật trạng thái Online nếu API key hợp lệ
-                if any(r.get("status") in ("OK", "QUOTA_EXCEEDED") for r in ping_res):
-                    st.session_state["is_llm_online"] = True
-            st.rerun()
+                # Kiểm tra lỗi xác thực 401
+                unauth = next((r for r in ping_res if r.get("status") == "UNAUTHENTICATED"), None)
+                if unauth:
+                    err_msg = unauth.get("error_message", "Khóa API không hợp lệ. Vui lòng lấy lại khóa tại aistudio.google.com/apikey (bắt đầu bằng AIzaSy...).")
+                    st.session_state["api_error_alert"] = f"❌ {err_msg}"
+                    st.session_state["ping_results"] = None
+                    st.session_state["is_llm_online"] = False
+                else:
+                    st.session_state["api_error_alert"] = None
+                    st.session_state["ping_results"] = ping_res
+                    if any(r.get("status") in ("OK", "QUOTA_EXCEEDED") for r in ping_res):
+                        st.session_state["is_llm_online"] = True
+        st.rerun()
+
+    # Hiển thị thông báo Alert lỗi nếu nhập API sai (không hiển thị các thẻ đỏ lỗi)
+    if st.session_state.get("api_error_alert"):
+        st.error(st.session_state["api_error_alert"])
 
     # HIỂN THỊ CHI TIẾT QUOTA VÀ THỜI GIAN RESET
     if st.session_state.get("ping_results"):
@@ -338,14 +354,15 @@ with col_right:
         task_scroll_container = st.container(height=350)
         with task_scroll_container:
             for idx, t in enumerate(recent_tasks):
-                tc1, tc2 = st.columns([2.3, 1], gap="small")
+                tc1, tc2 = st.columns([3.2, 0.9], gap="small")
                 with tc1:
                     lang_label = LANGS.get(t["target_lang"], (t["target_lang"],))[0]
+                    new_tag = '<span class="new-task-pill">MỚI</span>' if idx == 0 else ''
                     st.markdown(
                         f"<div class='task-item-card'>"
-                        f"📄 <b>{t['translated_file']}</b> "
-                        f"<span class='task-size-tag'>{t['file_size_kb']} KB</span><br/>"
-                        f"<span style='font-size: 0.75rem; opacity: 0.75;'>"
+                        f"📄 <span class='task-file-title'>{t['translated_file']}</span> "
+                        f"<span class='task-size-tag'>{t['file_size_kb']} KB</span>{new_tag}<br/>"
+                        f"<span style='font-size: 0.70rem; opacity: 0.72;'>"
                         f"🌐 {lang_label} • ⏰ {t['created_at']}</span>"
                         f"</div>",
                         unsafe_allow_html=True
@@ -354,7 +371,7 @@ with col_right:
                     if t["file_exists"]:
                         with open(t["file_path"], "rb") as tf:
                             st.download_button(
-                                label="📥 Tải file",
+                                label="📥 Tải",
                                 data=tf.read(),
                                 file_name=t["translated_file"],
                                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -362,8 +379,8 @@ with col_right:
                                 use_container_width=True
                             )
                     else:
-                        st.caption("File đã xóa")
-                st.markdown("<hr style='margin: 4px 0; opacity: 0.12;'/>", unsafe_allow_html=True)
+                        st.caption("Đã xóa")
+                st.markdown("<hr style='margin: 2px 0 4px 0; opacity: 0.08;'/>", unsafe_allow_html=True)
 
     if btn_translate:
         st.session_state["live_logs"] = []
