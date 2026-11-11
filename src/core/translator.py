@@ -1,8 +1,10 @@
 """Pipeline xử lý dịch toàn diện bài thuyết trình PowerPoint."""
 from __future__ import annotations
 
+import inspect
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Callable, Optional, Protocol
 
 from pptx import Presentation
@@ -24,6 +26,18 @@ class Translator(Protocol):
                   glossary: dict[str, str] | None, context: str) -> dict[str, str]: ...
 
 
+def _call_translate(tr: Translator, items: dict[str, str], target: str,
+                    glossary, context: str, source_lang: str, doc_type: str) -> dict[str, str]:
+    """Gọi tr.translate() tương thích cả Translator đơn giản lẫn GeminiTranslator mới."""
+    sig = inspect.signature(tr.translate)
+    kwargs = {}
+    if "source_lang" in sig.parameters:
+        kwargs["source_lang"] = source_lang
+    if "doc_type" in sig.parameters:
+        kwargs["doc_type"] = doc_type
+    return tr.translate(items, target, glossary, context, **kwargs)
+
+
 def _batches(keys, max_chars, max_items):
     cur, size = [], 0
     for k in keys:
@@ -37,7 +51,7 @@ def _batches(keys, max_chars, max_items):
 
 
 def translate_all(tr: Translator, sources: list[str], target: str, glossary, context,
-                  source_lang: str = "auto",
+                  source_lang: str = "auto", doc_type: str = "pptx",
                   max_chars=6000, max_items=50, workers=4, progress=None, log_func=None,
                   use_cache=True, rate_delay=0.3):
     """Xử lý dịch toàn bộ các đoạn văn bản (kết hợp bộ nhớ song ngữ và Gemini AI)."""
@@ -48,6 +62,9 @@ def translate_all(tr: Translator, sources: list[str], target: str, glossary, con
         if log_func:
             try: log_func(msg)
             except Exception: pass
+
+    if not sources:
+        return result, degraded, cached_count
 
     # 1. Kiểm tra bộ nhớ từ điển trước
     to_translate = sources
@@ -74,7 +91,7 @@ def translate_all(tr: Translator, sources: list[str], target: str, glossary, con
         if rate_delay > 0:
             time.sleep(rate_delay)
         items = {str(i): s for i, s in enumerate(batch)}
-        out = tr.translate(items, target, glossary, context, source_lang=source_lang)
+        out = _call_translate(tr, items, target, glossary, context, source_lang, doc_type)
         res = {}
         for i, s in enumerate(batch):
             d = out.get(str(i))
@@ -104,13 +121,13 @@ def translate_all(tr: Translator, sources: list[str], target: str, glossary, con
             progress(0.86, f"Đang tinh chỉnh {len(failed_sources)} đoạn...")
         for idx, s in enumerate(failed_sources, 1):
             for _ in range(2):
-                d = tr.translate({"0": s}, target, glossary, context, source_lang=source_lang).get("0")
+                d = _call_translate(tr, {"0": s}, target, glossary, context, source_lang, doc_type).get("0")
                 if d is not None and valid(s, d):
                     result[s] = d
                     break
             else:
                 flat = STYLE_TAG_RE.sub("", s)
-                d = tr.translate({"0": flat}, target, glossary, context, source_lang=source_lang).get("0") or flat
+                d = _call_translate(tr, {"0": flat}, target, glossary, context, source_lang, doc_type).get("0") or flat
                 result[s] = d if valid(flat, d, style=False) else flat
                 degraded.add(s)
             if progress:
@@ -201,4 +218,46 @@ def translate_pptx(src, dst, target, translator: Translator, source_lang: str = 
     if progress:
         progress(1.0, "Hoàn tất 100%! Tệp sẵn sàng tải về.")
     return rep
+
+
+def translate_document(src, dst, target, translator: Translator, source_lang: str = "auto",
+                       glossary=None, fit=True, min_scale=0.65, include_layouts=True,
+                       progress: Callable[[float, str], None] | None = None,
+                       log_func: Callable[[str], None] | None = None,
+                       use_cache=True, batch_size=50, rate_delay=0.3) -> Report:
+    """Bộ điều phối thống nhất dịch PowerPoint (.pptx), Word (.docx), Excel (.xlsx) và PDF (.pdf)."""
+    ext = Path(src).suffix.lower()
+    if ext == ".pptx":
+        return translate_pptx(
+            src=src, dst=dst, target=target, translator=translator, source_lang=source_lang,
+            glossary=glossary, fit=fit, min_scale=min_scale, include_layouts=include_layouts,
+            progress=progress, log_func=log_func, use_cache=use_cache,
+            batch_size=batch_size, rate_delay=rate_delay,
+        )
+    if ext == ".docx":
+        from src.core.docx_translator import translate_docx
+        return translate_docx(
+            src=src, dst=dst, target=target, translator=translator, source_lang=source_lang,
+            glossary=glossary, include_headers_footers=include_layouts,
+            progress=progress, log_func=log_func, use_cache=use_cache,
+            batch_size=batch_size, rate_delay=rate_delay,
+        )
+    if ext == ".xlsx":
+        from src.core.xlsx_translator import translate_xlsx
+        return translate_xlsx(
+            src=src, dst=dst, target=target, translator=translator, source_lang=source_lang,
+            glossary=glossary, fit=fit,
+            progress=progress, log_func=log_func, use_cache=use_cache,
+            batch_size=batch_size, rate_delay=rate_delay,
+        )
+    if ext == ".pdf":
+        from src.core.pdf_translator import translate_pdf
+        return translate_pdf(
+            src=src, dst=dst, target=target, translator=translator, source_lang=source_lang,
+            glossary=glossary, fit=fit, min_scale=min_scale,
+            progress=progress, log_func=log_func, use_cache=use_cache,
+            batch_size=batch_size, rate_delay=rate_delay,
+        )
+    raise ValueError(f"Định dạng tệp chưa được hỗ trợ: '{ext}'. Vui lòng chọn .pptx, .docx, .xlsx hoặc .pdf.")
+
 

@@ -8,15 +8,26 @@ from pathlib import Path
 import streamlit as st
 
 # Tự động tải lại các module nội bộ để tránh lỗi stale cache khi cập nhật code
-for mod in ["src.services.memory_service", "src.services.db_service", "src.services.gemini_service", "src.ui.styles"]:
+for mod in [
+    "src.config",
+    "src.services.db_service",
+    "src.services.memory_service",
+    "src.services.gemini_service",
+    "src.core.parser",
+    "src.core.docx_translator",
+    "src.core.xlsx_translator",
+    "src.core.pdf_translator",
+    "src.core.translator",
+    "src.ui.styles",
+]:
     if mod in sys.modules:
         try:
             importlib.reload(sys.modules[mod])
         except Exception:
             pass
 
-from src.config import LANGS, AVAILABLE_MODELS, SAMPLE_PPTX
-from src.core.translator import translate_pptx
+from src.config import LANGS, AVAILABLE_MODELS, SAMPLE_PPTX, SUPPORTED_FORMATS
+from src.core.translator import translate_document
 from src.services.gemini_service import GeminiTranslator, load_glossary, ping_test_models
 from src.services.memory_service import get_cache_stats, clear_cache, export_memory_markdown
 from src.services.db_service import save_translated_task, get_recent_tasks, clear_all_tasks
@@ -24,7 +35,7 @@ from src.ui.styles import SINGLE_PAGE_CSS
 
 # Cấu hình trang Streamlit
 st.set_page_config(
-    page_title="PPTX Translator AI",
+    page_title="Document Translator AI • PPTX • Word • Excel • PDF",
     page_icon="✨",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -47,10 +58,10 @@ if "ping_results" not in st.session_state:
 
 # Tiêu đề thanh lịch 1 dòng (Chữ sáng rực rỡ, độ tương phản cao)
 st.markdown(
-    '<div class="main-title">✨ <span class="title-text">PPTX Translator AI</span> '
-    '<span class="badge-tag">v2.5 Pro Engine</span> '
+    '<div class="main-title">✨ <span class="title-text">AI Document Translator</span> '
+    '<span class="badge-tag">v3.0 Multi-Format</span> '
     '<span class="main-sub">'
-    'Bảo toàn 100% Layout, Hình ảnh, Số liệu & Màu sắc chữ'
+    'PPTX • Word • Excel • PDF — Bảo toàn 100% Layout, Bảng biểu, Công thức & Màu sắc'
     '</span></div>',
     unsafe_allow_html=True
 )
@@ -185,19 +196,23 @@ with st.sidebar:
         st.caption("⚡ `SQLite TM`: Đang trống (Sẽ tự động tích lũy khi bạn dịch file)")
 
     st.markdown("---")
-    st.markdown("### 📐 Bố cục Slide")
-    st.caption("✅ **AI Smart Auto-Layout**: Tự động co chữ vừa khít khung, chống tràn viền.")
-    with st.expander("Tùy chỉnh co chữ"):
-        fit = st.checkbox("Tự co chữ", value=True)
+    st.markdown("### 📐 Bố cục & Định dạng")
+    st.caption("✅ **AI Smart Auto-Layout**: Tự động co chữ chống tràn khung cho PPTX, PDF & Excel.")
+    with st.expander("Tùy chỉnh co chữ & Header"):
+        fit = st.checkbox("Tự co chữ chống tràn", value=True)
         min_scale = st.slider("Co tối đa (%)", 50, 90, 65, 5) / 100
-        layouts = st.checkbox("Dịch cả slide master", value=True)
+        layouts = st.checkbox("Dịch Master / Header & Footer", value=True)
 
 # ----------------- KHUNG HÌNH CHÍNH (SINGLE-SCREEN 2 CỘT) -----------------
 col_left, col_right = st.columns([1, 1], gap="medium")
 
 with col_left:
     st.markdown('<div class="section-title">📂 1. Chọn tệp & Thiết lập</div>', unsafe_allow_html=True)
-    uploaded_file = st.file_uploader("Kéo thả tệp PowerPoint (.pptx)", type=["pptx"], label_visibility="collapsed")
+    uploaded_file = st.file_uploader(
+        "Kéo thả tệp PowerPoint, Word, Excel hoặc PDF (.pptx, .docx, .xlsx, .pdf)",
+        type=["pptx", "docx", "xlsx", "pdf"],
+        label_visibility="collapsed"
+    )
     
     if not uploaded_file and SAMPLE_PPTX.exists():
         if st.button("💡 Dùng thử nhanh file mẫu có sẵn"):
@@ -209,10 +224,13 @@ with col_left:
     if "use_sample" in st.session_state and not uploaded_file:
         uploaded_file = st.session_state["use_sample"]
 
+    file_fmt_label, file_icon, _ = ("Tài liệu", "📄", "application/octet-stream")
     if uploaded_file:
-        st.success(f"📄 **{uploaded_file.name}** ({len(uploaded_file.getvalue())/1024:.1f} KB)")
+        up_ext = Path(uploaded_file.name).suffix.lower()
+        file_fmt_label, file_icon, _ = SUPPORTED_FORMATS.get(up_ext, ("Tài liệu", "📄", "application/octet-stream"))
+        st.success(f"{file_icon} **{uploaded_file.name}** ({len(uploaded_file.getvalue())/1024:.1f} KB • {file_fmt_label})")
 
-    # 🌐 CHỌN NGÔN NGỮ GỐC VÀ NGÔN NGỮ ĐÍCH (THEO YÊU CẦU ẢNH 2)
+    # 🌐 CHỌN NGÔN NGỮ GỐC VÀ NGÔN NGỮ ĐÍCH
     col_l1, col_l2 = st.columns(2, gap="small")
     with col_l1:
         source_options = ["auto"] + list(LANGS.keys())
@@ -221,7 +239,7 @@ with col_left:
             options=source_options,
             format_func=lambda k: "🌐 Tự động nhận diện" if k == "auto" else f"{LANGS[k][0]} ({k})",
             index=0,
-            help="Chọn ngôn ngữ gốc của bài thuyết trình hoặc để AI tự động nhận diện"
+            help="Chọn ngôn ngữ gốc của tài liệu hoặc để AI tự động nhận diện"
         )
     with col_l2:
         default_target_idx = 0 if source_lang != "vi" else 1
@@ -230,7 +248,7 @@ with col_left:
             options=list(LANGS.keys()),
             format_func=lambda k: f"{LANGS[k][0]} ({k})",
             index=default_target_idx,
-            help="Chọn ngôn ngữ bạn muốn dịch bài thuyết trình sang"
+            help="Chọn ngôn ngữ bạn muốn dịch tài liệu sang"
         )
 
     src_label = "Tự động nhận diện" if source_lang == "auto" else LANGS[source_lang][0]
@@ -248,7 +266,8 @@ with col_left:
         gl_text = st.text_area("Mỗi dòng: `thuật ngữ = bản dịch`", placeholder="API = Giao diện lập trình", height=60, label_visibility="collapsed")
 
     btn_disabled = not (uploaded_file and api_key)
-    btn_translate = st.button("🚀 BẮT ĐẦU DỊCH POWERPOINT", type="primary", disabled=btn_disabled, use_container_width=True)
+    btn_label = f"🚀 BẮT ĐẦU DỊCH {file_fmt_label.upper()}" if uploaded_file else "🚀 BẮT ĐẦU DỊCH TÀI LIỆU"
+    btn_translate = st.button(btn_label, type="primary", disabled=btn_disabled, use_container_width=True)
 
     # 🔥 NHẬT KÝ THỜI GIAN THỰC (LIVE TERMINAL) NẰM NGAY DƯỚI NÚT DỊCH Ở CỘT TRÁI
     st.markdown('<div style="margin-top: 0.4rem;"></div>', unsafe_allow_html=True)
@@ -339,12 +358,14 @@ with col_right:
         with task_scroll_container:
             for idx, t in enumerate(recent_tasks):
                 tc1, tc2 = st.columns([3.2, 0.9], gap="small")
+                t_ext = Path(t["translated_file"]).suffix.lower()
+                _, t_icon, t_mime = SUPPORTED_FORMATS.get(t_ext, ("Tài liệu", "📄", "application/octet-stream"))
                 with tc1:
                     lang_label = LANGS.get(t["target_lang"], (t["target_lang"],))[0]
                     new_tag = '<span class="new-task-pill">MỚI</span>' if idx == 0 else ''
                     st.markdown(
                         f"<div class='task-item-card'>"
-                        f"📄 <span class='task-file-title'>{t['translated_file']}</span> "
+                        f"{t_icon} <span class='task-file-title'>{t['translated_file']}</span> "
                         f"<span class='task-size-tag'>{t['file_size_kb']} KB</span>{new_tag}<br/>"
                         f"<span style='font-size: 0.70rem; opacity: 0.72;'>"
                         f"🌐 {lang_label} • ⏰ {t['created_at']}</span>"
@@ -358,7 +379,7 @@ with col_right:
                                 label="📥 Tải",
                                 data=tf.read(),
                                 file_name=t["translated_file"],
-                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                mime=t_mime,
                                 key=f"dl_task_btn_{t['task_id']}_{idx}",
                                 use_container_width=True
                             )
@@ -381,8 +402,9 @@ with col_right:
 
         try:
             with tempfile.TemporaryDirectory() as d:
-                src_path = os.path.join(d, "input.pptx")
-                dst_path = os.path.join(d, "translated.pptx")
+                up_ext = Path(uploaded_file.name).suffix.lower() or ".pptx"
+                src_path = os.path.join(d, f"input{up_ext}")
+                dst_path = os.path.join(d, f"translated{up_ext}")
                 
                 with open(src_path, "wb") as f_out:
                     f_out.write(uploaded_file.getvalue())
@@ -391,7 +413,7 @@ with col_right:
                 translator = GeminiTranslator(api_key=api_key, model=model, log_func=ui_log)
                 glossary = load_glossary(gl_text) if gl_text.strip() else None
                 
-                report = translate_pptx(
+                report = translate_document(
                     src=src_path,
                     dst=dst_path,
                     target=target_lang,
@@ -415,7 +437,7 @@ with col_right:
                     st.session_state["translated_data"] = f_res.read()
                 
                 base_name = Path(uploaded_file.name).stem
-                st.session_state["translated_filename"] = f"{base_name}.{target_lang}.pptx"
+                st.session_state["translated_filename"] = f"{base_name}.{target_lang}{up_ext}"
                 st.session_state["report_text"] = report.text()
                 
                 # Lưu vào SQLite Database & thư mục exports

@@ -14,21 +14,39 @@ from google.genai import types
 from src.config import LANGS, FALLBACK_MODELS, DATA_DIR
 from src.services.db_service import get_connection, init_db
 
-SYSTEM = """You are an elite, specialized AI Localization Agent for PowerPoint Presentations (PPTX XML Preservation Engine).
-Your core mission is to translate the "text" content of every input item accurately and naturally into {target}, while preserving 100% of the underlying XML formatting tags, run structures, slide layout constraints, and technical entities.
+DOC_STYLE_GUIDES = {
+    "pptx": """2. SLIDE-OPTIMIZED PRESENTATION STYLE:
+   - Brevity & Impact: Slides require concise, punchy, high-impact phrasing. Avoid verbose prose or filler words.
+   - Length Parity: Keep the length of the translation close to the original length to prevent text overflow from slide boxes and table cells.
+   - Register: Professional, polished, executive business and technical presentation tone.
+   - Case & Punctuation: Match title case, sentence case, bullet conventions, and punctuation.""",
+    "docx": """2. DOCUMENT LOCALIZATION STYLE (WORD):
+   - Fluency & Coherence: Translate paragraphs naturally with smooth grammar while preserving exact inline formatting tags.
+   - Structural Consistency: Match headings, numbered lists, bullet conventions, form labels, and table header style.
+   - Register: Clear, authoritative business and technical document prose.
+   - Case & Punctuation: Preserve capitalization style and punctuation.""",
+    "xlsx": """2. SPREADSHEET LOCALIZATION STYLE (EXCEL):
+   - Precision & Conciseness: Translate column headers, labels, statuses, KPIs, and cell notes cleanly so spreadsheets remain compact and scannable.
+   - Metric Alignment: Keep units, percentages, currency codes, ticker/account codes, and short abbreviations intact.
+   - Register: Standard financial, operational, and business terminology.
+   - Preserve `<br/>` line breaks exactly where multi-line cell text uses them.""",
+    "pdf": """2. PDF LAYOUT-PRESERVED LOCALIZATION STYLE:
+   - Fixed-Box Awareness: Keep translated text concise and proportional in length to the original block so it fits inside fixed PDF bounding boxes without overflowing.
+   - Semantic Tag Alignment: Preserve inline `<rN>...</rN>` bold, italic, and color emphasis accurately.
+   - Register: Clean, accurate professional publication/business tone.""",
+}
+
+SYSTEM = """You are an elite, specialized AI Localization Agent for Enterprise Documents (PowerPoint, Word, Excel, PDF Preservation Engine).
+Your core mission is to translate the "text" content of every input item accurately and naturally into {target}, while preserving 100% of the underlying formatting tags, run structures, layout constraints, and technical entities.
 
 ### I. CORE ARCHITECTURAL DIRECTIVES
-1. XML FORMATTING TAG PRESERVATION (CRITICAL):
-   - Items contain structural XML tags: `<r1>...</r1>`, `<r2>...</r2>` (styled text runs with distinct fonts, colors, bold/italic), `<br/>` (line breaks), and `<f1/>` (auto fields like slide numbers, dates).
+1. FORMATTING TAG PRESERVATION (CRITICAL):
+   - Items may contain structural tags: `<r1>...</r1>`, `<r2>...</r2>` (styled text runs with distinct fonts, colors, bold/italic), `<br/>` (line breaks), and `<f1/>` (auto fields, inline images, page numbers, drawings).
    - STRICT CONSTRAINT: You MUST keep every single tag name and count EXACTLY identical to the input. Never add, delete, rename, or merge any tags.
    - SEMANTIC TAG ALIGNMENT: When target grammar requires changing word order, relocate `<rN>...</rN>` so that it encapsulates the EXACT translated phrase corresponding to the source text inside that original tag.
    - SPACING INTEGRITY: Preserve leading/trailing spaces inside or outside tags to ensure words do not concatenate unnaturally (e.g., `<r1>Hello </r1><r2>world</r2>` -> `<r1>Xin chào </r1><r2>thế giới</r2>`).
 
-2. SLIDE-OPTIMIZED PRESENTATION STYLE:
-   - Brevity & Impact: Slides require concise, punchy, high-impact phrasing. Avoid verbose prose or filler words.
-   - Length Parity: Keep the length of the translation close to the original length to prevent text overflow from slide boxes and table cells.
-   - Register: Professional, polished, executive business and technical presentation tone.
-   - Case & Punctuation: Match title case, sentence case, bullet conventions, and punctuation.
+{doc_style}
 
 3. UNTRANSLATABLE ENTITIES:
    - DO NOT translate: Brand names, product names, game titles, character names, model numbers, software terms, API endpoints (e.g., "Lupin", "Paladin", "RAF", "Aster", "API", "JSON", "Token", "ID", "v1.0").
@@ -143,21 +161,14 @@ class GeminiTranslator:
         except Exception:
             pass
 
-    def translate(self, items: dict[str, str], target: str, glossary=None, context="", source_lang: str = "auto"):
+    def _target_directive(self, target: str, source_lang: str = "auto") -> str:
         target_name = LANGS[target][0]
         if source_lang != "auto" and source_lang in LANGS:
-            src_name = LANGS[source_lang][0]
-            target_directive = f"{target_name} (Dịch từ: {src_name})"
-        else:
-            target_directive = target_name
+            return f"{target_name} (Dịch từ: {LANGS[source_lang][0]})"
+        return target_name
 
-        gl = ""
-        if glossary:
-            gl = "GLOSSARY (always use these translations):\n" + "\n".join(f"- {k} => {v}" for k, v in glossary.items())
-        system = SYSTEM.format(target=target_directive, glossary=gl, context=f"CONTEXT: {context}" if context else "")
-        payload = json.dumps([{"id": k, "text": v} for k, v in items.items()], ensure_ascii=False)
-        cfg = types.GenerateContentConfig(system_instruction=system, temperature=0.2,
-                                          response_mime_type="application/json")
+    def _generate_with_fallback(self, contents, cfg: types.GenerateContentConfig, label: str):
+        """Gửi request tới Gemini có cơ chế tự động retry và chuyển model dự phòng."""
         last = None
         models_to_try = [self.model] + [m for m in FALLBACK_MODELS if m != self.model]
 
@@ -165,15 +176,14 @@ class GeminiTranslator:
             self.active_model = m
             for attempt in range(self.retries):
                 try:
-                    self.log(f"🌐 Đang gửi {len(items)} đoạn tới Gemini ({m})...")
+                    self.log(f"🌐 {label} ({m})...")
                     t0 = time.time()
-                    resp = self.client.models.generate_content(model=m, contents=payload, config=cfg)
+                    resp = self.client.models.generate_content(model=m, contents=contents, config=cfg)
                     record_api_usage(m, 1)
                     elapsed = time.time() - t0
                     text = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.M).strip()
-                    res = {str(d["id"]): d["text"] for d in json.loads(text)}
-                    self.log(f"⚡ Model {m} dịch xong {len(res)} đoạn ({elapsed:.1f}s)")
-                    return res
+                    data = json.loads(text)
+                    return m, data, elapsed
                 except Exception as e:
                     last = e
                     err_str = str(e)
@@ -188,6 +198,44 @@ class GeminiTranslator:
                         self.log(f"🔄 Đang thử lại {m} (Lần {attempt+1}/{self.retries})...")
                         time.sleep(1.5 ** attempt)
         raise RuntimeError(f"Gemini lỗi sau khi thử các model: {last}")
+
+    def translate(self, items: dict[str, str], target: str, glossary=None, context="",
+                  source_lang: str = "auto", doc_type: str = "pptx"):
+        target_directive = self._target_directive(target, source_lang)
+        gl = ""
+        if glossary:
+            gl = "GLOSSARY (always use these translations):\n" + "\n".join(f"- {k} => {v}" for k, v in glossary.items())
+        doc_style = DOC_STYLE_GUIDES.get(doc_type, DOC_STYLE_GUIDES["pptx"])
+        system = SYSTEM.format(
+            target=target_directive,
+            doc_style=doc_style,
+            glossary=gl,
+            context=f"CONTEXT: {context}" if context else ""
+        )
+        payload = json.dumps([{"id": k, "text": v} for k, v in items.items()], ensure_ascii=False)
+        cfg = types.GenerateContentConfig(system_instruction=system, temperature=0.2,
+                                          response_mime_type="application/json")
+        m, parsed, elapsed = self._generate_with_fallback(payload, cfg, f"Đang gửi {len(items)} đoạn tới Gemini")
+        res = {str(d["id"]): d["text"] for d in parsed}
+        self.log(f"⚡ Model {m} dịch xong {len(res)} đoạn ({elapsed:.1f}s)")
+        return res
+
+    def translate_image_page(self, png_bytes: bytes, target: str, glossary=None,
+                             source_lang: str = "auto") -> list[dict]:
+        """OCR & dịch trang PDF dạng ảnh scan bằng Gemini Vision."""
+        target_directive = self._target_directive(target, source_lang)
+        gl = ""
+        if glossary:
+            gl = "\nGLOSSARY:\n" + "\n".join(f"- {k} => {v}" for k, v in glossary.items())
+        prompt = (
+            f"Read all visible text in this scanned document page image in natural reading order, "
+            f"and translate it accurately into {target_directive}. Keep numbers, codes, URLs intact.{gl}\n"
+            f'Return ONLY a JSON array of objects: [{{"type": "heading"|"text"|"table", "content": "<translated text>"}}].'
+        )
+        cfg = types.GenerateContentConfig(temperature=0.2, response_mime_type="application/json")
+        contents = [types.Part.from_bytes(data=png_bytes, mime_type="image/png"), prompt]
+        _, parsed, _ = self._generate_with_fallback(contents, cfg, "Đang OCR & dịch trang PDF scan")
+        return parsed if isinstance(parsed, list) else []
 
 
 def ping_test_models(api_key: str) -> list[dict]:

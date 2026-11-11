@@ -56,3 +56,12 @@ FALLBACK_MODELS = [
     "gemini-3.8-flash"
 ]
 
+# Metadata các định dạng tệp hỗ trợ: (Nhãn hiển thị, Icon, MIME type)
+SUPPORTED_FORMATS = {
+    ".pptx": ("PowerPoint", "📊", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+    ".docx": ("Word", "📝", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    ".xlsx": ("Excel", "📗", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    ".pdf": ("PDF", "📕", "application/pdf"),
+}
+
+

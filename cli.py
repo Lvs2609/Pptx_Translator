@@ -5,13 +5,13 @@ import sys
 from pathlib import Path
 
 from src.config import LANGS
-from src.core.translator import translate_pptx
+from src.core.translator import translate_document
 from src.services.gemini_service import GeminiTranslator, load_glossary
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Dịch PPTX giữ nguyên định dạng (Gemini AI)")
-    ap.add_argument("input", help="Đường dẫn file .pptx cần dịch")
+    ap = argparse.ArgumentParser(description="Dịch PPTX / Word / Excel / PDF giữ nguyên định dạng (Gemini AI)")
+    ap.add_argument("input", help="Đường dẫn file cần dịch (.pptx, .docx, .xlsx, .pdf)")
     ap.add_argument("-s", "--source", default="auto", help="Ngôn ngữ gốc (mặc định: auto)")
     ap.add_argument("-t", "--target", choices=LANGS, required=True, help="Ngôn ngữ đích")
     ap.add_argument("-o", "--output", help="Đường dẫn file xuất ra")
@@ -26,10 +26,11 @@ def main():
     if not key:
         sys.exit("❌ Thiếu biến môi trường GEMINI_API_KEY trong file .env")
 
-    out = a.output or str(Path(a.input).with_suffix("")) + f".{a.target}.pptx"
+    in_path = Path(a.input)
+    out = a.output or f"{in_path.with_suffix('')}.{a.target}{in_path.suffix}"
     gl = load_glossary(Path(a.glossary).read_text(encoding="utf-8")) if a.glossary else None
 
-    rep = translate_pptx(
+    rep = translate_document(
         src=a.input,
         dst=out,
         target=a.target,

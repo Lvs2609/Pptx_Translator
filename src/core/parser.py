@@ -133,9 +133,14 @@ def parse_paragraph(p, owner, kind, where) -> Optional[Unit]:
     return u
 
 
-def needs_translation(u: Unit) -> bool:
-    t = u.plain.strip()
+def needs_translation_text(text: str) -> bool:
+    """Kiểm tra đoạn text có chứa chữ cái cần dịch và không phải URL/Email."""
+    t = (text or "").strip()
     return bool(_LETTER.search(t)) and not _SKIP.match(t)
+
+
+def needs_translation(u: Unit) -> bool:
+    return needs_translation_text(u.plain)
 
 
 def _walk(shapes):
