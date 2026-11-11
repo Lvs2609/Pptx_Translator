@@ -1,3 +1,4 @@
+import html
 import io
 import importlib
 import os
@@ -41,8 +42,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Nhúng CSS thích ứng Sáng/Tối, nút lưu bên trên, fixed scroll log
-st.markdown(SINGLE_PAGE_CSS, unsafe_allow_html=True)
+# Nhúng CSS thích ứng Sáng/Tối, nút lưu bên trên, fixed scroll log (dùng st.html tránh bị Markdown escape)
+st.html(SINGLE_PAGE_CSS)
 
 # Khởi tạo session state
 if "translated_data" not in st.session_state:
@@ -57,13 +58,12 @@ if "ping_results" not in st.session_state:
     st.session_state["ping_results"] = None
 
 # Tiêu đề thanh lịch 1 dòng (Chữ sáng rực rỡ, độ tương phản cao)
-st.markdown(
+st.html(
     '<div class="main-title">✨ <span class="title-text">AI Document Translator</span> '
     '<span class="badge-tag">v3.0 Multi-Format</span> '
     '<span class="main-sub">'
     'PPTX • Word • Excel • PDF — Bảo toàn 100% Layout, Bảng biểu, Công thức & Màu sắc'
-    '</span></div>',
-    unsafe_allow_html=True
+    '</span></div>'
 )
 
 # ----------------- THANH BÊN (SIDEBAR) -----------------
@@ -72,14 +72,13 @@ with st.sidebar:
     is_online = st.session_state.get("is_llm_online", False)
     current_active = st.session_state.get("active_model", "gemini-3.5-flash")
     if is_online:
-        st.markdown(
+        st.html(
             f"""
             <div class="active-model-card">
-                <span class="active-model-name">🤖 {current_active}</span>
+                <span class="active-model-name">🤖 {html.escape(current_active)}</span>
                 <span class="active-model-badge">ONLINE 🟢</span>
             </div>
-            """,
-            unsafe_allow_html=True
+            """
         )
 
     st.markdown("### 🛠️ Cấu hình & Công cụ")
@@ -148,7 +147,7 @@ with st.sidebar:
                 card_html = f"""
                 <div class="quota-card {card_cls}">
                     <div class="quota-header-row">
-                        <span class="quota-model-name">🤖 {model_name}{active_tag}</span>
+                        <span class="quota-model-name">🤖 {html.escape(str(model_name))}{active_tag}</span>
                         <span class="quota-ping-pill">⚡ {ping_val}ms</span>
                     </div>
                     <div class="quota-detail-line">📊 {usage_txt}</div>
@@ -161,7 +160,7 @@ with st.sidebar:
                     </div>
                 </div>
                 """
-                st.markdown(card_html, unsafe_allow_html=True)
+                st.html(card_html)
 
     model_choice = st.selectbox("🤖 Model LLM Ưu Tiên", AVAILABLE_MODELS, index=0)
     model = st.text_input("Tên Model", "gemini-3.5-flash") if model_choice == "Tùy chỉnh khác..." else model_choice
@@ -207,7 +206,7 @@ with st.sidebar:
 col_left, col_right = st.columns([1, 1], gap="medium")
 
 with col_left:
-    st.markdown('<div class="section-title">📂 1. Chọn tệp & Thiết lập</div>', unsafe_allow_html=True)
+    st.html('<div class="section-title">📂 1. Chọn tệp & Thiết lập</div>')
     uploaded_file = st.file_uploader(
         "Kéo thả tệp PowerPoint, Word, Excel hoặc PDF (.pptx, .docx, .xlsx, .pdf)",
         type=["pptx", "docx", "xlsx", "pdf"],
@@ -253,11 +252,10 @@ with col_left:
 
     src_label = "Tự động nhận diện" if source_lang == "auto" else LANGS[source_lang][0]
     dst_label = LANGS[target_lang][0]
-    st.markdown(
+    st.html(
         f'<div style="font-size: 0.8rem; color: var(--text-color); opacity: 0.82; margin: -4px 0 8px 0;">'
-        f'🧭 Hướng dịch: <b>{src_label}</b> ➔ <b>{dst_label}</b>'
-        f'</div>',
-        unsafe_allow_html=True
+        f'🧭 Hướng dịch: <b>{html.escape(src_label)}</b> ➔ <b>{html.escape(dst_label)}</b>'
+        f'</div>'
     )
     if source_lang == target_lang and source_lang != "auto":
         st.warning("⚠️ Ngôn ngữ gốc và ngôn ngữ đích đang trùng nhau!")
@@ -270,7 +268,7 @@ with col_left:
     btn_translate = st.button(btn_label, type="primary", disabled=btn_disabled, use_container_width=True)
 
     # 🔥 NHẬT KÝ THỜI GIAN THỰC (LIVE TERMINAL) NẰM NGAY DƯỚI NÚT DỊCH Ở CỘT TRÁI
-    st.markdown('<div style="margin-top: 0.4rem;"></div>', unsafe_allow_html=True)
+    st.html('<div style="margin-top: 0.4rem;"></div>')
     log_box = st.empty()
 
     def render_logs(new_msg=None):
@@ -296,7 +294,7 @@ with col_left:
                 color = "#c084fc"  # Tím pastel
             else:
                 color = "#cbd5e1"  # Xám bạc
-            lines_html.append(f"<div style='color: {color}; margin-bottom: 2px;'>{l}</div>")
+            lines_html.append(f"<div style='color: {color}; margin-bottom: 2px;'>{html.escape(l)}</div>")
             
         terminal_html = f"""
         <div class="terminal-container">
@@ -318,7 +316,7 @@ with col_left:
             if (tb) {{ tb.scrollTop = tb.scrollHeight; }}
         </script>
         """
-        log_box.markdown(terminal_html, unsafe_allow_html=True)
+        log_box.html(terminal_html, unsafe_allow_javascript=True)
 
     render_logs()
 
@@ -326,7 +324,7 @@ with col_right:
     # 🔥 CỘT PHẢI: TIẾN ĐỘ & DANH SÁCH DATA CÁC FILE ĐÃ DỊCH (SQLITE DB)
     hdr_c1, hdr_c2 = st.columns([1.6, 1], gap="small")
     with hdr_c1:
-        st.markdown('<div class="section-title">📊 2. TIẾN ĐỘ & FILE ĐÃ DỊCH</div>', unsafe_allow_html=True)
+        st.html('<div class="section-title">📊 2. TIẾN ĐỘ & FILE ĐÃ DỊCH</div>')
     with hdr_c2:
         if st.button("🗑️ Dọn lịch sử DB", help="Xóa danh sách file đã dịch trong SQLite DB", use_container_width=True):
             clear_all_tasks()
@@ -339,20 +337,18 @@ with col_right:
     # DANH SÁCH CÁC FILE ĐÃ DỊCH TRONG SQLITE DB KÈM NÚT TẢI RIÊNG CHO TỪNG FILE
     recent_tasks = get_recent_tasks(limit=30)
     if not recent_tasks:
-        st.markdown(
+        st.html(
             '<div class="empty-tasks-card">'
             '<div style="font-size: 1.8rem; margin-bottom: 6px;">📂</div>'
             '<div style="font-weight: 700; font-size: 0.95rem; margin-bottom: 4px;">Chưa có tệp nào được dịch</div>'
             '<div style="font-size: 0.8rem; opacity: 0.75;">Các file dịch hoàn thành sẽ tự động lưu vào SQLite DB và hiển thị tại đây kèm nút tải về riêng biệt.</div>'
-            '</div>',
-            unsafe_allow_html=True
+            '</div>'
         )
     else:
-        st.markdown(
+        st.html(
             f'<div style="font-size: 0.82rem; font-weight: 700; color: var(--text-color); margin: 0.2rem 0 0.4rem 0;">'
             f'📁 ĐÃ LƯU TRỮ {len(recent_tasks)} TỆP TRONG CƠ SỞ DỮ LIỆU SQLITE:'
-            f'</div>',
-            unsafe_allow_html=True
+            f'</div>'
         )
         task_scroll_container = st.container(height=350)
         with task_scroll_container:
@@ -363,14 +359,13 @@ with col_right:
                 with tc1:
                     lang_label = LANGS.get(t["target_lang"], (t["target_lang"],))[0]
                     new_tag = '<span class="new-task-pill">MỚI</span>' if idx == 0 else ''
-                    st.markdown(
+                    st.html(
                         f"<div class='task-item-card'>"
-                        f"{t_icon} <span class='task-file-title'>{t['translated_file']}</span> "
+                        f"{t_icon} <span class='task-file-title'>{html.escape(t['translated_file'])}</span> "
                         f"<span class='task-size-tag'>{t['file_size_kb']} KB</span>{new_tag}<br/>"
                         f"<span style='font-size: 0.70rem; opacity: 0.72;'>"
-                        f"🌐 {lang_label} • ⏰ {t['created_at']}</span>"
-                        f"</div>",
-                        unsafe_allow_html=True
+                        f"🌐 {html.escape(lang_label)} • ⏰ {html.escape(t['created_at'])}</span>"
+                        f"</div>"
                     )
                 with tc2:
                     if t["file_exists"]:
@@ -385,7 +380,7 @@ with col_right:
                             )
                     else:
                         st.caption("Đã xóa")
-                st.markdown("<hr style='margin: 2px 0 4px 0; opacity: 0.08;'/>", unsafe_allow_html=True)
+                st.html("<hr style='margin: 2px 0 4px 0; opacity: 0.08;'/>")
 
     if btn_translate:
         st.session_state["live_logs"] = []

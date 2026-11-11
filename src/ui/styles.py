@@ -1,7 +1,14 @@
 """CSS giao diện cao cấp: Sử dụng biến theme chuẩn của Streamlit, đảm bảo hiển thị 100% rõ nét ở cả Chế độ Sáng & Tối."""
 
-SINGLE_PAGE_CSS = """
-<style>
+SINGLE_PAGE_CSS = """<style>
+    /* Ẩn khoảng trống của thẻ style nhúng via st.html */
+    div[data-testid="stElementContainer"]:has(style:only-child) {
+        display: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        height: 0 !important;
+    }
+
     /* =========================================================
        1. VIEWPORT CỐ ĐỊNH VỪA KHÍT 1 MÀN HÌNH (NO SCROLL NGOÀI)
        ========================================================= */
