@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import html
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -252,7 +253,15 @@ def translate_xlsx(src, dst, target, translator: Translator, source_lang: str = 
     if progress:
         progress(0.92, "Đang phục hồi định dạng ô & căn chỉnh Excel...")
 
+    # Tính tổng chiều rộng các vùng merged cell để ước lượng đúng số dòng ngắt
+    merged_span_cols: dict[tuple[str, str], tuple[int, int]] = {}
+    for ws in wb.worksheets:
+        for mr in ws.merged_cells.ranges:
+            coord = ws.cell(mr.min_row, mr.min_col).coordinate
+            merged_span_cols[(ws.title, coord)] = (mr.min_col, mr.max_col)
+
     col_widened: set[tuple[str, int]] = set()
+    rows_fitted: set[tuple[str, int]] = set()
     for u in units:
         d = trans.get(u.tagged, u.tagged)
         if u.tagged in degraded:
@@ -272,27 +281,50 @@ def translate_xlsx(src, dst, target, translator: Translator, source_lang: str = 
             u.cell.value = translated_plain
 
         if fit and u.cell.coordinate:
-            w_src = _width(u.plain)
-            w_dst = _width(translated_plain)
-            if w_src > 0 and w_dst > w_src * 1.15:
-                try:
+            try:
+                c_min, c_max = merged_span_cols.get((u.ws.title, u.cell.coordinate), (u.cell.column, u.cell.column))
+                total_col_w = sum(
+                    (u.ws.column_dimensions[get_column_letter(ci)].width or 10.5)
+                    for ci in range(c_min, c_max + 1)
+                )
+                w_src = _width(u.plain)
+                w_dst = _width(translated_plain)
+                # Quy đổi tương đương độ dài ký tự hiển thị Excel
+                dst_chars = w_dst * 2.0
+
+                if dst_chars > total_col_w * 0.9 or "\n" in translated_plain or (w_src > 0 and w_dst > w_src * 1.1):
                     align = copy.copy(u.cell.alignment) if u.cell.alignment else openpyxl.styles.Alignment()
                     if not align.wrap_text:
                         align.wrap_text = True
                         u.cell.alignment = align
-                    # Mở rộng nhẹ chiều rộng cột nếu chưa giãn (giới hạn tối đa 48 để giữ bố cục)
-                    col_key = (u.ws.title, u.cell.column)
-                    if col_key not in col_widened:
-                        col_letter = get_column_letter(u.cell.column)
-                        cur_w = u.ws.column_dimensions[col_letter].width
-                        if cur_w and cur_w < 42:
-                            u.ws.column_dimensions[col_letter].width = min(48, round(cur_w * min(1.35, w_dst / w_src), 1))
-                            col_widened.add(col_key)
-                except Exception:
-                    pass
 
-    if col_widened:
-        rep.fitted.append(f"Tự giãn & wrap-text ở {len(col_widened)} cột Excel")
+                    # Mở rộng cột đơn vừa phải nếu hẹp (< 42)
+                    if c_min == c_max:
+                        col_key = (u.ws.title, u.cell.column)
+                        if col_key not in col_widened:
+                            col_letter = get_column_letter(u.cell.column)
+                            cur_w = u.ws.column_dimensions[col_letter].width or 10.5
+                            if cur_w < 42 and dst_chars > cur_w * 0.95:
+                                new_w = min(46.0, round(max(cur_w * min(1.35, max(1.1, w_dst / max(0.5, w_src))), min(38.0, dst_chars * 1.08)), 1))
+                                u.ws.column_dimensions[col_letter].width = new_w
+                                total_col_w = new_w
+                                col_widened.add(col_key)
+
+                    # Tự động tăng chiều cao dòng nếu dòng đã gán chiều cao cố định (chống cắt chữ theo chiều dọc)
+                    row_dim = u.ws.row_dimensions[u.cell.row]
+                    if row_dim.height is not None:
+                        font_sz = float(u.cell.font.size) if (u.cell.font and u.cell.font.size) else 11.0
+                        lines = translated_plain.splitlines() or [""]
+                        est_lines = sum(max(1, math.ceil((_width(ln) * 2.0) / max(4.0, total_col_w * 0.92))) for ln in lines)
+                        needed_h = round(est_lines * max(13.5, font_sz * 1.38) + 4.0, 1)
+                        if needed_h > row_dim.height:
+                            row_dim.height = min(409.0, needed_h)
+                            rows_fitted.add((u.ws.title, u.cell.row))
+            except Exception:
+                pass
+
+    if col_widened or rows_fitted:
+        rep.fitted.append(f"Chống tràn Excel ({len(col_widened)} cột, {len(rows_fitted)} dòng)")
 
     _log("💾 Đang đóng gói và lưu tệp Excel (.xlsx) hoàn chỉnh...")
     if progress:

@@ -200,7 +200,8 @@ def translate_pptx(src, dst, target, translator: Translator, source_lang: str = 
         if progress:
             progress(0.95, "Đang tự động nhận diện bố cục & tối ưu kích thước chữ chống tràn...")
         for owner, kind, where, w_src, w_dst in by_owner.values():
-            if kind != "notes" and w_src > 0 and w_dst / w_src > 1.2:
+            threshold = 1.10 if kind == "cell" else 1.2
+            if kind != "notes" and w_src > 0 and w_dst / w_src > threshold:
                 ratio = w_dst / w_src
                 s = fit_text(owner, kind, ratio, min_scale)
                 if s is None:

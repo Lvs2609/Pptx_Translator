@@ -197,16 +197,84 @@ def _build_pdf_unit(page_idx: int, where: str, segments: list[dict]) -> Optional
     )
 
 
-def _collect_pdf_units(doc: pymupdf.Document) -> dict[int, list[PdfUnit]]:
-    """Quét tất cả các trang PDF, tách bảng/cột và gom đoạn văn bảo toàn vị trí."""
+def _extract_page_walls(page: pymupdf.Page) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
+    """Trích xuất toàn bộ đường viền ngang/dọc của bảng biểu, hộp Step và callout trên trang PDF."""
+    h_lines: list[tuple[float, float, float]] = []
+    v_lines: list[tuple[float, float, float]] = []
+    pw, ph = page.rect.width, page.rect.height
+
+    def _add_seg(p1, p2):
+        x1, y1 = float(p1.x), float(p1.y)
+        x2, y2 = float(p2.x), float(p2.y)
+        if abs(y1 - y2) <= 1.5 and abs(x2 - x1) >= 6.0:
+            h_lines.append(((y1 + y2) * 0.5, min(x1, x2), max(x1, x2)))
+        elif abs(x1 - x2) <= 1.5 and abs(y2 - y1) >= 6.0:
+            v_lines.append(((x1 + x2) * 0.5, min(y1, y2), max(y1, y2)))
+
+    def _add_box_edges(r: pymupdf.Rect):
+        w, h = r.width, r.height
+        if w > pw * 0.98 and h > ph * 0.98:
+            return
+        if h <= 3.5 and w >= 6.0:
+            h_lines.append(((r.y0 + r.y1) * 0.5, r.x0, r.x1))
+        elif w <= 3.5 and h >= 6.0:
+            v_lines.append(((r.x0 + r.x1) * 0.5, r.y0, r.y1))
+        elif w >= 6.0 and h >= 6.0:
+            h_lines.append((r.y0, r.x0, r.x1))
+            h_lines.append((r.y1, r.x0, r.x1))
+            v_lines.append((r.x0, r.y0, r.y1))
+            v_lines.append((r.x1, r.y0, r.y1))
+
+    for d in page.get_drawings():
+        has_straight = False
+        for item in d.get("items", []):
+            kind = item[0]
+            if kind == "l":
+                _add_seg(item[1], item[2])
+                if abs(item[1].x - item[2].x) >= 6.0 or abs(item[1].y - item[2].y) >= 6.0:
+                    has_straight = True
+            elif kind == "re":
+                _add_box_edges(pymupdf.Rect(item[1]))
+                has_straight = True
+            elif kind == "qu":
+                q = item[1]
+                _add_seg(q.ul, q.ur)
+                _add_seg(q.ll, q.lr)
+                _add_seg(q.ul, q.ll)
+                _add_seg(q.ur, q.lr)
+                has_straight = True
+
+        # Fallback cho callout bo tròn vẽ toàn bằng đường cong Bezier
+        if not has_straight and (d.get("color") is not None or d.get("fill") is not None):
+            r = d.get("rect")
+            if r is not None and 12.0 <= r.width <= pw * 0.85 and 10.0 <= r.height <= ph * 0.65:
+                _add_box_edges(pymupdf.Rect(r))
+
+    return h_lines, v_lines
+
+
+def _has_h_wall_between(y_top: float, y_bot: float, x0: float, x1: float,
+                        h_lines: list[tuple[float, float, float]]) -> bool:
+    """Kiểm tra có đường kẻ ngang ngăn cách hai dòng bảng hay không."""
+    for hy, lx0, lx1 in h_lines:
+        if y_top - 1.5 <= hy <= y_bot + 1.5:
+            if min(x1, lx1) > max(x0, lx0) + 2.0:
+                return True
+    return False
+
+
+def _collect_pdf_units(doc: pymupdf.Document) -> tuple[dict[int, list[PdfUnit]], dict[int, tuple]]:
+    """Quét tất cả các trang PDF, trích xuất ranh giới khung/bảng và gom đoạn văn bảo toàn ô."""
     units_by_page: dict[int, list[PdfUnit]] = {}
+    walls_by_page: dict[int, tuple] = {}
     flags = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_DEHYPHENATE
 
     for page_idx in range(len(doc)):
         page = doc[page_idx]
+        h_lines, v_lines = _extract_page_walls(page)
+        walls_by_page[page_idx] = (h_lines, v_lines)
         p_dict = page.get_text("dict", flags=flags)
         page_units: list[PdfUnit] = []
-        unit_counter = 0
 
         for block in p_dict.get("blocks", []):
             if block.get("type") != 0:
@@ -217,14 +285,13 @@ def _collect_pdf_units(doc: pymupdf.Document) -> dict[int, list[PdfUnit]]:
                 segs = _split_line_columns(line)
                 if not segs:
                     continue
-                # Nếu dòng bị tách nhiều cột ngang -> mỗi cột là 1 unit riêng biệt
+                # Nếu dòng bị tách nhiều cột ngang hoặc xoay góc -> mỗi cột là 1 unit riêng biệt
                 if len(segs) > 1 or _dir_to_rotate(line.get("dir", (1, 0))) != 0:
                     for seg in segs:
-                        unit_counter += 1
                         u = _build_pdf_unit(page_idx, f"Trang {page_idx + 1}", [seg])
                         if u:
                             page_units.append(u)
-                    line_groups.append([])  # Ngắt nhóm đoạn
+                    line_groups.append([])
                     continue
 
                 seg = segs[0]
@@ -234,9 +301,16 @@ def _collect_pdf_units(doc: pymupdf.Document) -> dict[int, list[PdfUnit]]:
                     curr_y0 = seg["bbox"][1]
                     prev_h = max(8.0, prev_y1 - prev_seg["bbox"][1])
                     v_gap = curr_y0 - prev_y1
-                    x_aligned = abs(seg["bbox"][0] - prev_seg["bbox"][0]) <= 28.0
-                    # Chỉ gộp nếu nằm gần nhau theo chiều dọc và thẳng lề
-                    if -2.0 <= v_gap <= prev_h * 0.85 and x_aligned:
+                    prev_cx = (prev_seg["bbox"][0] + prev_seg["bbox"][2]) * 0.5
+                    curr_cx = (seg["bbox"][0] + seg["bbox"][2]) * 0.5
+                    x_aligned = abs(seg["bbox"][0] - prev_seg["bbox"][0]) <= 28.0 or abs(curr_cx - prev_cx) <= 16.0
+                    crossed_wall = _has_h_wall_between(
+                        prev_y1, curr_y0,
+                        min(seg["bbox"][0], prev_seg["bbox"][0]),
+                        max(seg["bbox"][2], prev_seg["bbox"][2]),
+                        h_lines,
+                    )
+                    if -2.0 <= v_gap <= prev_h * 0.85 and x_aligned and not crossed_wall:
                         line_groups[-1].append(seg)
                         continue
                 line_groups.append([seg])
@@ -244,7 +318,6 @@ def _collect_pdf_units(doc: pymupdf.Document) -> dict[int, list[PdfUnit]]:
             for grp in line_groups:
                 if not grp:
                     continue
-                unit_counter += 1
                 u = _build_pdf_unit(page_idx, f"Trang {page_idx + 1}", grp)
                 if u:
                     page_units.append(u)
@@ -252,13 +325,17 @@ def _collect_pdf_units(doc: pymupdf.Document) -> dict[int, list[PdfUnit]]:
         if page_units:
             units_by_page[page_idx] = page_units
 
-    return units_by_page
+    return units_by_page, walls_by_page
 
 
-def _unit_to_html(unit: PdfUnit, translated: str) -> str:
-    """Chuyển chuỗi đã dịch (kèm thẻ <rN>, <br/>) sang HTML để PyMuPDF render Unicode & style."""
+def _unit_to_html(unit: PdfUnit, translated: str, align: str = "left", tight: bool = False) -> str:
+    """Chuyển chuỗi đã dịch sang HTML với kích thước tương đối để PyMuPDF tự co chống tràn."""
     cur = unit.default_id
     chunks: list[str] = []
+    def_style = unit.styles_by_id.get(unit.default_id)
+    raw_base_sz = def_style.size if def_style else unit.avg_size
+    # Trong ô/hộp hẹp giảm nhẹ ~6% cỡ gốc và siết line-height để chữ không chạm viền
+    base_sz = max(5.0, raw_base_sz * (0.93 if tight else 0.97))
 
     def _span_html(style: Optional[PdfSpanStyle], text: str) -> str:
         safe = html.escape(text, quote=True)
@@ -266,9 +343,11 @@ def _unit_to_html(unit: PdfUnit, translated: str) -> str:
             return safe
         weight = "bold" if style.bold else "normal"
         fstyle = "italic" if style.italic else "normal"
+        pct = max(65.0, min(160.0, (style.size / max(1.0, raw_base_sz)) * 100.0))
+        sz_css = f" font-size:{pct:.0f}%;" if abs(pct - 100.0) >= 5.0 else ""
         return (
             f'<span style="font-weight:{weight}; font-style:{fstyle}; '
-            f'color:{style.color}; font-size:{style.size:.1f}pt;">{safe}</span>'
+            f'color:{style.color};{sz_css}">{safe}</span>'
         )
 
     for tok in TAG_RE.split(translated):
@@ -286,39 +365,131 @@ def _unit_to_html(unit: PdfUnit, translated: str) -> str:
         else:
             chunks.append(_span_html(unit.styles_by_id.get(cur), html.unescape(tok)))
 
-    def_style = unit.styles_by_id.get(unit.default_id)
-    base_sz = def_style.size if def_style else unit.avg_size
+    line_h = "1.06" if tight else "1.12"
     return (
         f'<div style="font-family: sans-serif; font-size: {base_sz:.1f}pt; '
-        f'line-height: 1.18; margin: 0; padding: 0;">{"".join(chunks)}</div>'
+        f'line-height: {line_h}; text-align: {align}; overflow-wrap: break-word; '
+        f'margin: 0; padding: 0.5pt 1pt;">{"".join(chunks)}</div>'
     )
 
 
-def _compute_safe_rect(unit: PdfUnit, all_units: list[PdfUnit], page_rect: pymupdf.Rect) -> pymupdf.Rect:
-    """Mở rộng nhẹ vùng chèn chữ nếu không chạm khối lân cận, giúp câu dịch không bị cắt."""
-    x0, y0, x1, y1 = unit.bbox
+def _compute_safe_rect(
+    unit: PdfUnit,
+    all_units: list[PdfUnit],
+    h_lines: list[tuple[float, float, float]],
+    v_lines: list[tuple[float, float, float]],
+    page_rect: pymupdf.Rect,
+) -> tuple[pymupdf.Rect, str, bool]:
+    """Khóa chặt vùng chèn chữ bên trong ranh giới đường viền ô/callout và tránh khối lân cận."""
+    ux0, uy0, ux1, uy1 = unit.bbox
     if unit.rotate != 0:
-        return pymupdf.Rect(x0, y0, x1, y1)
+        return pymupdf.Rect(ux0, uy0, ux1, uy1), "left", True
 
-    # Tìm giới hạn y1 gần nhất phía dưới có chồng lấn theo chiều ngang
-    max_y1 = page_rect.y1 - 10.0
-    max_x1 = page_rect.x1 - 10.0
+    cx = (ux0 + ux1) * 0.5
+    cy = (uy0 + uy1) * 0.5
+    u_w = max(1.0, ux1 - ux0)
+    u_h = max(1.0, uy1 - uy0)
+
+    # 1. Tìm tường dọc trái/phải của ô bảng hoặc callout chứa đoạn văn
+    left_wall: Optional[float] = None
+    right_wall: Optional[float] = None
+    for vx, ly0, ly1 in v_lines:
+        if min(uy1 - 0.5, ly1) >= max(uy0 + 0.5, ly0) or (ly0 - 1.5 <= cy <= ly1 + 1.5):
+            if vx <= ux0 + 2.5 and (left_wall is None or vx > left_wall):
+                left_wall = vx
+            if vx >= ux1 - 2.5 and (right_wall is None or vx < right_wall):
+                right_wall = vx
+
+    # 2. Tìm tường ngang trên/dưới của ô bảng hoặc callout
+    top_wall: Optional[float] = None
+    bottom_wall: Optional[float] = None
+    for hy, lx0, lx1 in h_lines:
+        if min(ux1 - 0.5, lx1) >= max(ux0 + 0.5, lx0) or (lx0 - 1.5 <= cx <= lx1 + 1.5):
+            if hy <= uy0 + 2.5 and (top_wall is None or hy > top_wall):
+                top_wall = hy
+            if hy >= uy1 - 1.0 and (bottom_wall is None or hy < bottom_wall):
+                bottom_wall = hy
+
+    wall_x0 = (left_wall + 2.0) if left_wall is not None else page_rect.x0 + 4.0
+    wall_x1 = (right_wall - 2.0) if right_wall is not None else page_rect.x1 - 4.0
+    wall_y0 = (top_wall + 1.5) if top_wall is not None else page_rect.y0 + 4.0
+    wall_y1 = (bottom_wall - 1.5) if bottom_wall is not None else page_rect.y1 - 4.0
+
+    # 3. Tìm chữ lân cận theo chiều ngang trên cùng dải dòng
+    nb_left = page_rect.x0 + 4.0
+    nb_right = page_rect.x1 - 4.0
+    same_row_siblings = 0
     for other in all_units:
         if other is unit:
             continue
         ox0, oy0, ox1, oy1 = other.bbox
-        # Kiểm tra chồng lấn ngang cho mở rộng dọc
-        if min(x1, ox1) > max(x0, ox0) - 4.0 and oy0 >= y1 - 2.0:
-            max_y1 = min(max_y1, oy0 - 1.5)
-        # Kiểm tra chồng lấn dọc cho mở rộng ngang nhẹ
-        if min(y1, oy1) > max(y0, oy0) and ox0 >= x1 - 2.0:
-            max_x1 = min(max_x1, ox0 - 2.0)
+        if min(uy1 - 1.0, oy1) > max(uy0 + 1.0, oy0):
+            if ox1 <= ux0 + 1.5:
+                nb_left = max(nb_left, ox1 + 2.5)
+            elif ox0 >= ux1 - 1.5:
+                nb_right = min(nb_right, ox0 - 2.5)
+            if left_wall is not None and right_wall is not None:
+                ocx = (ox0 + ox1) * 0.5
+                if left_wall <= ocx <= right_wall:
+                    same_row_siblings += 1
 
-    height = y1 - y0
-    safe_y1 = max(y1 + 2.0, min(max_y1, y0 + max(height * 1.65, unit.avg_size * 1.9)))
-    extra_w = min(24.0, max(6.0, (x1 - x0) * 0.2))
-    safe_x1 = min(max_x1, x1 + extra_w)
-    return pymupdf.Rect(max(page_rect.x0, x0), max(page_rect.y0, y0 - 0.5), safe_x1, safe_y1)
+    limit_x0 = max(wall_x0, nb_left)
+    limit_x1 = min(wall_x1, nb_right)
+
+    align = "left"
+    enclosed_h = (left_wall is not None and right_wall is not None and (right_wall - left_wall) <= 440.0)
+    if enclosed_h and same_row_siblings == 0 and limit_x1 > limit_x0 + 8.0:
+        # Một chữ duy nhất nằm trong ô bảng/callout: tận dụng toàn bộ chiều ngang bên trong ô
+        left_gap = ux0 - wall_x0
+        right_gap = wall_x1 - ux1
+        if abs(left_gap - right_gap) <= 10.0 and left_gap >= 3.0 and right_gap >= 3.0:
+            align = "center"
+            final_x0, final_x1 = limit_x0, limit_x1
+        elif right_gap <= 6.0 and left_gap > right_gap + 12.0:
+            align = "right"
+            final_x0, final_x1 = limit_x0, limit_x1
+        else:
+            final_x0 = limit_x0 if left_gap <= 8.0 else max(limit_x0, ux0)
+            final_x1 = limit_x1
+    elif right_wall is not None and (right_wall - ux1) <= 160.0:
+        final_x0 = max(limit_x0, ux0)
+        final_x1 = limit_x1
+    else:
+        # Vùng mở không có khung viền sát bên phải: chỉ mở rộng cực nhẹ để không tràn vào ảnh
+        final_x0 = max(limit_x0, ux0)
+        final_x1 = min(limit_x1, ux1 + min(10.0, max(3.0, u_w * 0.08)))
+
+    if final_x1 <= final_x0 + 6.0:
+        final_x0 = max(page_rect.x0 + 2.0, min(ux0, wall_x0))
+        final_x1 = max(final_x0 + 8.0, min(limit_x1, ux1 + 4.0))
+
+    # 4. Tìm chữ lân cận theo chiều dọc trong phạm vi [final_x0, final_x1]
+    nb_bottom = page_rect.y1 - 4.0
+    for other in all_units:
+        if other is unit:
+            continue
+        ox0, oy0, ox1, _ = other.bbox
+        if min(final_x1, ox1) > max(final_x0, ox0) - 2.0 and oy0 >= uy1 - 2.0:
+            nb_bottom = min(nb_bottom, oy0 - 1.5)
+
+    hard_y1 = min(wall_y1, nb_bottom)
+    tight_box = False
+
+    if bottom_wall is not None and (wall_y1 - uy1) <= max(u_h * 1.4, 42.0):
+        # Đóng khung kín phía dưới (ô bảng, hộp Step, callout): TUYỆT ĐỐI không vượt wall_y1
+        tight_box = (wall_y1 - wall_y0) <= max(u_h * 1.6, 34.0)
+        if tight_box and top_wall is not None:
+            final_y0 = min(wall_y0, uy0)
+        else:
+            final_y0 = max(wall_y0, uy0 - 0.5)
+        final_y1 = max(final_y0 + 6.0, hard_y1)
+    else:
+        # Không có đường viền sát bên dưới -> chỉ cho phép nới dọc vừa phải, không đè xuống ảnh/bên dưới
+        final_y0 = max(wall_y0, uy0 - 0.5)
+        open_cap = uy0 + max(u_h * 1.25, unit.avg_size * 1.55)
+        final_y1 = max(final_y0 + 6.0, min(hard_y1, open_cap))
+
+    return pymupdf.Rect(final_x0, final_y0, final_x1, final_y1), align, tight_box
 
 
 def _translate_scanned_pdf(doc: pymupdf.Document, dst, target: str, translator: Translator,
@@ -389,7 +560,7 @@ def translate_pdf(src, dst, target, translator: Translator, source_lang: str = "
         if progress:
             progress(0.05, f"Đang phân tích {num_pages} trang PDF...")
 
-        units_by_page = _collect_pdf_units(doc)
+        units_by_page, walls_by_page = _collect_pdf_units(doc)
         all_units = [u for page_units in units_by_page.values() for u in page_units]
 
         if not all_units and num_pages > 0:
@@ -424,9 +595,11 @@ def translate_pdf(src, dst, target, translator: Translator, source_lang: str = "
         if progress:
             progress(0.92, "Đang chèn bản dịch vào bố cục PDF gốc...")
 
-        scale_floor = min(0.45, max(0.15, min_scale - 0.15)) if fit else 1.0
+        scale_floor = min(0.35, max(0.18, min_scale * 0.4)) if fit else 1.0
         for page_idx, page_units in units_by_page.items():
             page = doc[page_idx]
+            h_lines, v_lines = walls_by_page.get(page_idx, ([], []))
+
             # 1. Xóa sạch chữ gốc theo từng span bbox (không xóa ảnh, nền màu, đường viền)
             for u in page_units:
                 for r in u.span_rects:
@@ -436,22 +609,22 @@ def translate_pdf(src, dst, target, translator: Translator, source_lang: str = "
                 graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
             )
 
-            # 2. Chèn văn bản đã dịch kèm font Unicode vào đúng tọa độ cũ
+            # 2. Chèn văn bản đã dịch bên trong đúng khung viền ô/callout (không tràn viền)
             for u in page_units:
                 d = trans.get(u.tagged, u.tagged)
                 if u.tagged in degraded:
                     rep.degraded.append(f"{u.where}: “{u.plain[:25].strip()}…”")
 
-                html_str = _unit_to_html(u, d)
-                rect = _compute_safe_rect(u, page_units, page.rect)
+                rect, align, tight = _compute_safe_rect(u, page_units, h_lines, v_lines, page.rect)
+                html_str = _unit_to_html(u, d, align=align, tight=tight)
                 spare, scale = page.insert_htmlbox(rect, html_str, scale_low=scale_floor, rotate=u.rotate)
-                if spare < 0 and fit:
-                    # Fallback an toàn: hạ scale tối thiểu hoặc nới rộng hộp để chữ không bị mất
-                    spare2, scale = page.insert_htmlbox(rect, html_str, scale_low=0.1, rotate=u.rotate)
+                if spare < 0:
+                    # Hạ scale tối thiểu trong phạm vi chính ô đó (tuyệt đối không mở vượt tường viền)
+                    spare2, scale = page.insert_htmlbox(rect, html_str, scale_low=0.08, rotate=u.rotate)
                     if spare2 < 0:
-                        wider = pymupdf.Rect(rect.x0, rect.y0, max(rect.x1, page.rect.x1 - 12), max(rect.y1, rect.y0 + rect.height * 2.5))
-                        page.insert_htmlbox(wider, html_str, scale_low=0.1, rotate=u.rotate)
-                        rep.warnings.append(f"{u.where}: khối chữ rất dài, đã mở rộng khung chứa.")
+                        padded = pymupdf.Rect(rect.x0, max(page.rect.y0, rect.y0 - 1.5), rect.x1, min(page.rect.y1, rect.y1 + max(4.0, rect.height * 0.4)))
+                        page.insert_htmlbox(padded, html_str, scale_low=0.05, rotate=u.rotate)
+                        rep.warnings.append(f"{u.where}: khối chữ quá hẹp, đã co tối đa ({int(scale * 100)}%).")
                 if scale < 0.98 and fit:
                     rep.fitted.append(f"{u.where} ({int(scale * 100)}%)")
 
