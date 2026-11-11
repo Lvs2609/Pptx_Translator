@@ -379,11 +379,11 @@ def _compute_safe_rect(
     h_lines: list[tuple[float, float, float]],
     v_lines: list[tuple[float, float, float]],
     page_rect: pymupdf.Rect,
-) -> tuple[pymupdf.Rect, str, bool]:
+) -> tuple[pymupdf.Rect, str, bool, str]:
     """Khóa chặt vùng chèn chữ bên trong ranh giới đường viền ô/callout và tránh khối lân cận."""
     ux0, uy0, ux1, uy1 = unit.bbox
     if unit.rotate != 0:
-        return pymupdf.Rect(ux0, uy0, ux1, uy1), "left", True
+        return pymupdf.Rect(ux0, uy0, ux1, uy1), "left", True, "top"
 
     cx = (ux0 + ux1) * 0.5
     cy = (uy0 + uy1) * 0.5
@@ -463,33 +463,50 @@ def _compute_safe_rect(
         final_x0 = max(page_rect.x0 + 2.0, min(ux0, wall_x0))
         final_x1 = max(final_x0 + 8.0, min(limit_x1, ux1 + 4.0))
 
-    # 4. Tìm chữ lân cận theo chiều dọc trong phạm vi [final_x0, final_x1]
+    # 4. Tìm chữ lân cận theo chiều dọc và anh em cùng cột trong ô [wall_y0, wall_y1]
     nb_bottom = page_rect.y1 - 4.0
+    same_col_siblings = 0
     for other in all_units:
         if other is unit:
             continue
-        ox0, oy0, ox1, _ = other.bbox
-        if min(final_x1, ox1) > max(final_x0, ox0) - 2.0 and oy0 >= uy1 - 2.0:
-            nb_bottom = min(nb_bottom, oy0 - 1.5)
+        ox0, oy0, ox1, oy1 = other.bbox
+        if min(final_x1, ox1) > max(final_x0, ox0) - 2.0:
+            if oy0 >= uy1 - 2.0:
+                nb_bottom = min(nb_bottom, oy0 - 1.5)
+            if top_wall is not None and bottom_wall is not None:
+                ocy = (oy0 + oy1) * 0.5
+                if top_wall <= ocy <= bottom_wall:
+                    same_col_siblings += 1
 
     hard_y1 = min(wall_y1, nb_bottom)
     tight_box = False
+    v_align = "top"
 
-    if bottom_wall is not None and (wall_y1 - uy1) <= max(u_h * 1.4, 42.0):
+    enclosed_v = (top_wall is not None and bottom_wall is not None and (wall_y1 - uy1) <= max(u_h * 1.4, 42.0))
+    if enclosed_v:
         # Đóng khung kín phía dưới (ô bảng, hộp Step, callout): TUYỆT ĐỐI không vượt wall_y1
         tight_box = (wall_y1 - wall_y0) <= max(u_h * 1.6, 34.0)
-        if tight_box and top_wall is not None:
-            final_y0 = min(wall_y0, uy0)
+        if same_col_siblings == 0:
+            top_gap = uy0 - wall_y0
+            bot_gap = wall_y1 - uy1
+            if abs(top_gap - bot_gap) <= 7.0 and top_gap >= 1.5 and bot_gap >= 1.5:
+                v_align = "middle"
+                final_y0 = wall_y0
+            elif bot_gap <= 5.0 and top_gap > bot_gap + 10.0:
+                v_align = "bottom"
+                final_y0 = wall_y0
+            else:
+                final_y0 = max(wall_y0, uy0 - 0.5)
         else:
             final_y0 = max(wall_y0, uy0 - 0.5)
         final_y1 = max(final_y0 + 6.0, hard_y1)
     else:
-        # Không có đường viền sát bên dưới -> chỉ cho phép nới dọc vừa phải, không đè xuống ảnh/bên dưới
+        # Không có đường viền sát bên dưới -> giữ nguyên y0 gốc, chỉ cho phép nới dọc vừa phải
         final_y0 = max(wall_y0, uy0 - 0.5)
         open_cap = uy0 + max(u_h * 1.25, unit.avg_size * 1.55)
         final_y1 = max(final_y0 + 6.0, min(hard_y1, open_cap))
 
-    return pymupdf.Rect(final_x0, final_y0, final_x1, final_y1), align, tight_box
+    return pymupdf.Rect(final_x0, final_y0, final_x1, final_y1), align, tight_box, v_align
 
 
 def _translate_scanned_pdf(doc: pymupdf.Document, dst, target: str, translator: Translator,
@@ -596,37 +613,62 @@ def translate_pdf(src, dst, target, translator: Translator, source_lang: str = "
             progress(0.92, "Đang chèn bản dịch vào bố cục PDF gốc...")
 
         scale_floor = min(0.35, max(0.18, min_scale * 0.4)) if fit else 1.0
-        for page_idx, page_units in units_by_page.items():
-            page = doc[page_idx]
-            h_lines, v_lines = walls_by_page.get(page_idx, ([], []))
+        scratch_doc = pymupdf.open()
+        try:
+            for page_idx, page_units in units_by_page.items():
+                page = doc[page_idx]
+                h_lines, v_lines = walls_by_page.get(page_idx, ([], []))
 
-            # 1. Xóa sạch chữ gốc theo từng span bbox (không xóa ảnh, nền màu, đường viền)
-            for u in page_units:
-                for r in u.span_rects:
-                    page.add_redact_annot(r, fill=None)
-            page.apply_redactions(
-                images=pymupdf.PDF_REDACT_IMAGE_NONE,
-                graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
-            )
+                # Lọc các khối thực sự thay đổi nội dung (giữ nguyên 100% mã hiệu/số/ID không đổi)
+                changed_units: list[tuple[PdfUnit, str]] = []
+                for u in page_units:
+                    d = trans.get(u.tagged, u.tagged)
+                    dst_plain = html.unescape(STYLE_TAG_RE.sub("", d).replace("<br/>", "\n")).strip()
+                    if dst_plain == u.plain.strip():
+                        continue
+                    changed_units.append((u, d))
 
-            # 2. Chèn văn bản đã dịch bên trong đúng khung viền ô/callout (không tràn viền)
-            for u in page_units:
-                d = trans.get(u.tagged, u.tagged)
-                if u.tagged in degraded:
-                    rep.degraded.append(f"{u.where}: “{u.plain[:25].strip()}…”")
+                if not changed_units:
+                    continue
 
-                rect, align, tight = _compute_safe_rect(u, page_units, h_lines, v_lines, page.rect)
-                html_str = _unit_to_html(u, d, align=align, tight=tight)
-                spare, scale = page.insert_htmlbox(rect, html_str, scale_low=scale_floor, rotate=u.rotate)
-                if spare < 0:
-                    # Hạ scale tối thiểu trong phạm vi chính ô đó (tuyệt đối không mở vượt tường viền)
-                    spare2, scale = page.insert_htmlbox(rect, html_str, scale_low=0.08, rotate=u.rotate)
-                    if spare2 < 0:
-                        padded = pymupdf.Rect(rect.x0, max(page.rect.y0, rect.y0 - 1.5), rect.x1, min(page.rect.y1, rect.y1 + max(4.0, rect.height * 0.4)))
-                        page.insert_htmlbox(padded, html_str, scale_low=0.05, rotate=u.rotate)
-                        rep.warnings.append(f"{u.where}: khối chữ quá hẹp, đã co tối đa ({int(scale * 100)}%).")
-                if scale < 0.98 and fit:
-                    rep.fitted.append(f"{u.where} ({int(scale * 100)}%)")
+                # 1. Xóa sạch chữ gốc theo từng span bbox (không xóa ảnh, nền màu, đường viền)
+                for u, _d in changed_units:
+                    for r in u.span_rects:
+                        page.add_redact_annot(r, fill=None)
+                page.apply_redactions(
+                    images=pymupdf.PDF_REDACT_IMAGE_NONE,
+                    graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+                )
+
+                spage = scratch_doc.new_page(width=page.rect.width, height=page.rect.height)
+
+                # 2. Chèn văn bản đã dịch giữ đúng vị trí gốc (căn giữa dọc/ngang chuẩn xác)
+                for u, d in changed_units:
+                    if u.tagged in degraded:
+                        rep.degraded.append(f"{u.where}: “{u.plain[:25].strip()}…”")
+
+                    rect, align, tight, v_align = _compute_safe_rect(u, page_units, h_lines, v_lines, page.rect)
+                    html_str = _unit_to_html(u, d, align=align, tight=tight)
+
+                    if v_align in ("middle", "bottom"):
+                        m_spare, m_scale = spage.insert_htmlbox(rect, html_str, scale_low=scale_floor, rotate=u.rotate)
+                        if m_spare < 0:
+                            m_spare, m_scale = spage.insert_htmlbox(rect, html_str, scale_low=0.08, rotate=u.rotate)
+                        if m_spare > 1.0:
+                            offset = m_spare * 0.48 if v_align == "middle" else max(0.0, m_spare - 0.8)
+                            rect = pymupdf.Rect(rect.x0, min(rect.y1 - 4.0, rect.y0 + offset), rect.x1, rect.y1)
+
+                    spare, scale = page.insert_htmlbox(rect, html_str, scale_low=scale_floor, rotate=u.rotate)
+                    if spare < 0:
+                        spare2, scale = page.insert_htmlbox(rect, html_str, scale_low=0.08, rotate=u.rotate)
+                        if spare2 < 0:
+                            padded = pymupdf.Rect(rect.x0, max(page.rect.y0, rect.y0 - 2.0), rect.x1, min(page.rect.y1, rect.y1 + max(4.0, rect.height * 0.4)))
+                            page.insert_htmlbox(padded, html_str, scale_low=0.05, rotate=u.rotate)
+                            rep.warnings.append(f"{u.where}: khối chữ quá hẹp, đã co tối đa ({int(scale * 100)}%).")
+                    if scale < 0.98 and fit:
+                        rep.fitted.append(f"{u.where} ({int(scale * 100)}%)")
+        finally:
+            scratch_doc.close()
 
         _log("💾 Đang nén font Unicode (subset) & lưu tệp PDF hoàn chỉnh...")
         if progress:
