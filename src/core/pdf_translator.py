@@ -66,19 +66,35 @@ def _span_style(span: dict) -> PdfSpanStyle:
     return PdfSpanStyle(bold=bold, italic=italic, color=color_hex, size=size)
 
 
-def _split_line_columns(line: dict) -> list[dict]:
-    """Tách các span trên cùng 1 dòng nếu có khoảng trống ngang lớn (ô bảng / nhiều cột)."""
+def _has_v_wall_between(x_left: float, x_right: float, y0: float, y1: float,
+                        v_lines: list[tuple[float, float, float]]) -> bool:
+    """Kiểm tra có đường kẻ dọc ngăn cách hai vùng văn bản trên cùng một dòng hay không."""
+    for vx, ly0, ly1 in v_lines:
+        if x_left - 2.0 <= vx <= x_right + 2.0:
+            if min(y1, ly1) > max(y0, ly0) + 1.5:
+                return True
+    return False
+
+
+def _split_line_columns(line: dict, v_lines: list[tuple[float, float, float]] | None = None) -> list[dict]:
+    """Tách các span trên cùng 1 dòng nếu có đường kẻ dọc ngăn cách hoặc khoảng trống cột rất lớn."""
     spans = [s for s in line.get("spans", []) if s.get("text")]
     if not spans:
         return []
 
+    v_lines = v_lines or []
     spans.sort(key=lambda s: s["bbox"][0])
     groups: list[list[dict]] = [[spans[0]]]
     for sp in spans[1:]:
         prev = groups[-1][-1]
-        gap = float(sp["bbox"][0]) - float(prev["bbox"][2])
+        px1 = float(prev["bbox"][2])
+        sx0 = float(sp["bbox"][0])
+        gap = sx0 - px1
         ref_size = max(float(prev.get("size", 10.0)), float(sp.get("size", 10.0)), 6.0)
-        if gap > max(14.0, ref_size * 2.2):
+        ly0 = min(float(prev["bbox"][1]), float(sp["bbox"][1]))
+        ly1 = max(float(prev["bbox"][3]), float(sp["bbox"][3]))
+        has_wall = _has_v_wall_between(px1, sx0, ly0, ly1, v_lines) if gap > 2.0 else False
+        if has_wall or gap > max(32.0, ref_size * 4.0):
             groups.append([sp])
         else:
             groups[-1].append(sp)
@@ -125,6 +141,7 @@ def _build_pdf_unit(page_idx: int, where: str, segments: list[dict]) -> Optional
     prev_line_text = ""
     for seg_idx, seg in enumerate(segments):
         line_buf = ""
+        prev_sp_x1: Optional[float] = None
         for sp in seg["spans"]:
             txt = sp.get("text", "")
             if not txt:
@@ -138,7 +155,11 @@ def _build_pdf_unit(page_idx: int, where: str, segments: list[dict]) -> Optional
             prefix = ""
             if seg_idx > 0 and not line_buf and _needs_join_space(prev_line_text, txt):
                 prefix = " "
+            elif prev_sp_x1 is not None and (float(sp["bbox"][0]) - prev_sp_x1) > st.size * 0.35:
+                if _needs_join_space(line_buf, txt):
+                    prefix = " "
             line_buf += txt
+            prev_sp_x1 = float(sp["bbox"][2])
             combined = prefix + txt
 
             if parts and parts[-1][1] == sig:
@@ -263,8 +284,82 @@ def _has_h_wall_between(y_top: float, y_bot: float, x0: float, x1: float,
     return False
 
 
+def _dominant_seg_style(seg: dict) -> tuple[str, float]:
+    """Lấy màu chữ và cỡ chữ chủ đạo của một segment dòng."""
+    spans = [s for s in seg.get("spans", []) if (s.get("text") or "").strip()]
+    if not spans:
+        spans = seg.get("spans", [])
+    if not spans:
+        return ("#000000", 10.0)
+    longest_sp = max(spans, key=lambda s: len(s.get("text", "")))
+    st = _span_style(longest_sp)
+    return (st.color, st.size)
+
+
+def _enclosing_box_sig(
+    bbox: tuple[float, float, float, float],
+    h_lines: list[tuple[float, float, float]],
+    v_lines: list[tuple[float, float, float]],
+) -> Optional[tuple[float, float, float, float]]:
+    """Tìm khung chữ nhật kín gần nhất bao quanh segment (nếu là ô bảng / callout / hộp Step)."""
+    ux0, uy0, ux1, uy1 = bbox
+    cx, cy = (ux0 + ux1) * 0.5, (uy0 + uy1) * 0.5
+    lw = rw = tw = bw = None
+    for vx, ly0, ly1 in v_lines:
+        if min(uy1 - 0.5, ly1) >= max(uy0 + 0.5, ly0) or (ly0 - 1.5 <= cy <= ly1 + 1.5):
+            if vx <= ux0 + 2.5 and (lw is None or vx > lw):
+                lw = vx
+            if vx >= ux1 - 2.5 and (rw is None or vx < rw):
+                rw = vx
+    for hy, lx0, lx1 in h_lines:
+        if min(ux1 - 0.5, lx1) >= max(ux0 + 0.5, lx0) or (lx0 - 1.5 <= cx <= lx1 + 1.5):
+            if hy <= uy0 + 2.5 and (tw is None or hy > tw):
+                tw = hy
+            if hy >= uy1 - 1.0 and (bw is None or hy < bw):
+                bw = hy
+    if lw is not None and rw is not None and tw is not None and bw is not None:
+        if 12.0 <= (rw - lw) <= 450.0 and 10.0 <= (bw - tw) <= 260.0:
+            return (round(lw, 1), round(rw, 1), round(tw, 1), round(bw, 1))
+    return None
+
+
+def _merge_same_line_segments(
+    segs: list[dict],
+    v_lines: list[tuple[float, float, float]],
+    h_lines: list[tuple[float, float, float]],
+) -> list[dict]:
+    """Gộp các mảnh chữ bị tách block trên cùng 1 dòng ngang nếu không có vạch ngăn."""
+    if len(segs) <= 1:
+        return segs
+    ordered = sorted(segs, key=lambda s: (round(s["bbox"][1] / 3.0), s["bbox"][0]))
+    merged: list[dict] = []
+    for seg in ordered:
+        ux0, uy0, ux1, uy1 = seg["bbox"]
+        uh = max(4.0, uy1 - uy0)
+        attached = False
+        for target in reversed(merged):
+            tx0, ty0, tx1, ty1 = target["bbox"]
+            th = max(4.0, ty1 - ty0)
+            v_overlap = min(uy1, ty1) - max(uy0, ty0)
+            if v_overlap >= 0.45 * min(uh, th):
+                # Giữa target và seg gần nhau hoặc chồng lấn theo chiều ngang và không bị vạch dọc chắn
+                gap = max(ux0 - tx1, tx0 - ux1)
+                ref_sz = max(seg["style"][1], target["style"][1], 6.0)
+                if gap <= max(28.0, ref_sz * 3.2):
+                    wx_left, wx_right = min(tx1, ux1), max(tx0, ux0)
+                    has_v_sep = _has_v_wall_between(wx_left, wx_right, min(uy0, ty0), max(uy1, ty1), v_lines) if gap > 1.0 else False
+                    if not has_v_sep and abs((uy0 + uy1) - (ty0 + ty1)) * 0.5 <= max(uh, th) * 0.65:
+                        target["spans"] = sorted(target["spans"] + seg["spans"], key=lambda sp: sp["bbox"][0])
+                        target["bbox"] = (min(tx0, ux0), min(ty0, uy0), max(tx1, ux1), max(ty1, uy1))
+                        attached = True
+                        break
+        if not attached:
+            merged.append(dict(seg))
+    return merged
+
+
 def _collect_pdf_units(doc: pymupdf.Document) -> tuple[dict[int, list[PdfUnit]], dict[int, tuple]]:
-    """Quét tất cả các trang PDF, trích xuất ranh giới khung/bảng và gom đoạn văn bảo toàn ô."""
+    """Quét tất cả các trang PDF, gộp câu bị xé lẻ và gom đoạn văn bảo toàn ô."""
     units_by_page: dict[int, list[PdfUnit]] = {}
     walls_by_page: dict[int, tuple] = {}
     flags = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_DEHYPHENATE
@@ -275,49 +370,87 @@ def _collect_pdf_units(doc: pymupdf.Document) -> tuple[dict[int, list[PdfUnit]],
         walls_by_page[page_idx] = (h_lines, v_lines)
         p_dict = page.get_text("dict", flags=flags)
         page_units: list[PdfUnit] = []
+        raw_h_segs: list[dict] = []
 
-        for block in p_dict.get("blocks", []):
+        for b_idx, block in enumerate(p_dict.get("blocks", [])):
             if block.get("type") != 0:
                 continue
-
-            line_groups: list[list[dict]] = []
             for line in block.get("lines", []):
-                segs = _split_line_columns(line)
+                segs = _split_line_columns(line, v_lines)
                 if not segs:
                     continue
-                # Nếu dòng bị tách nhiều cột ngang hoặc xoay góc -> mỗi cột là 1 unit riêng biệt
-                if len(segs) > 1 or _dir_to_rotate(line.get("dir", (1, 0))) != 0:
+                if _dir_to_rotate(line.get("dir", (1, 0))) != 0:
                     for seg in segs:
                         u = _build_pdf_unit(page_idx, f"Trang {page_idx + 1}", [seg])
                         if u:
                             page_units.append(u)
-                    line_groups.append([])
                     continue
+                for seg in segs:
+                    seg["block_idx"] = b_idx
+                    seg["style"] = _dominant_seg_style(seg)
+                    seg["box_sig"] = _enclosing_box_sig(seg["bbox"], h_lines, v_lines)
+                    raw_h_segs.append(seg)
 
-                seg = segs[0]
+        # Bước 1: Gộp các mảnh cùng 1 dòng bị tách giữa các block (như callout H3, chữ màu khác...)
+        vis_segs = _merge_same_line_segments(raw_h_segs, v_lines, h_lines)
+        for seg in vis_segs:
+            seg["box_sig"] = _enclosing_box_sig(seg["bbox"], h_lines, v_lines)
+            seg["style"] = _dominant_seg_style(seg)
+
+        # Bước 2: Gom các dòng thuộc cùng hộp kín (Step, Callout) hoặc cùng block
+        box_buckets: dict[tuple, list[dict]] = {}
+        for idx_s, seg in enumerate(vis_segs):
+            if seg["box_sig"] is not None:
+                key = ("box", seg["box_sig"])
+            else:
+                key = ("blk", seg["block_idx"], 1 if seg.get("has_split") else 0, round(seg["bbox"][0] / 35.0) if seg.get("has_split") else 0)
+            box_buckets.setdefault(key, []).append(seg)
+
+        for key, segs in box_buckets.items():
+            is_enclosed_box = (key[0] == "box")
+            segs.sort(key=lambda s: (s["bbox"][1], s["bbox"][0]))
+            line_groups: list[list[dict]] = []
+            for seg in segs:
                 if line_groups and line_groups[-1]:
-                    prev_seg = line_groups[-1][-1]
-                    prev_y1 = prev_seg["bbox"][3]
+                    prev = line_groups[-1][-1]
+                    prev_y1 = prev["bbox"][3]
                     curr_y0 = seg["bbox"][1]
-                    prev_h = max(8.0, prev_y1 - prev_seg["bbox"][1])
+                    prev_h = max(8.0, prev_y1 - prev["bbox"][1])
                     v_gap = curr_y0 - prev_y1
-                    prev_cx = (prev_seg["bbox"][0] + prev_seg["bbox"][2]) * 0.5
+                    prev_cx = (prev["bbox"][0] + prev["bbox"][2]) * 0.5
                     curr_cx = (seg["bbox"][0] + seg["bbox"][2]) * 0.5
-                    x_aligned = abs(seg["bbox"][0] - prev_seg["bbox"][0]) <= 28.0 or abs(curr_cx - prev_cx) <= 16.0
-                    crossed_wall = _has_h_wall_between(
+                    x_aligned = abs(seg["bbox"][0] - prev["bbox"][0]) <= 28.0 or abs(curr_cx - prev_cx) <= 18.0
+                    crossed_h = _has_h_wall_between(
                         prev_y1, curr_y0,
-                        min(seg["bbox"][0], prev_seg["bbox"][0]),
-                        max(seg["bbox"][2], prev_seg["bbox"][2]),
+                        min(seg["bbox"][0], prev["bbox"][0]),
+                        max(seg["bbox"][2], prev["bbox"][2]),
                         h_lines,
                     )
-                    if -2.0 <= v_gap <= prev_h * 0.85 and x_aligned and not crossed_wall:
+                    same_blk = seg["block_idx"] == prev["block_idx"]
+                    same_size = abs(seg["style"][1] - prev["style"][1]) <= 0.8
+                    same_style = (seg["style"][0] == prev["style"][0]) and same_size
+                    left_flowing_para = (
+                        is_enclosed_box
+                        and same_size
+                        and abs(seg["bbox"][0] - prev["bbox"][0]) <= 16.0
+                        and (prev["bbox"][2] - prev["bbox"][0]) >= (key[1][1] - key[1][0]) * 0.52
+                    )
+                    overlapping_box = (
+                        min(seg["bbox"][2], prev["bbox"][2]) > max(seg["bbox"][0], prev["bbox"][0]) + 1.0
+                        and v_gap < 0.0 and v_gap >= -prev_h * 0.65
+                    )
+                    can_merge = (
+                        not crossed_h
+                        and (-prev_h * 0.45 <= v_gap <= prev_h * 0.85)
+                        and (x_aligned or overlapping_box)
+                        and (same_blk or (is_enclosed_box and (same_style or left_flowing_para)) or overlapping_box)
+                    )
+                    if can_merge:
                         line_groups[-1].append(seg)
                         continue
                 line_groups.append([seg])
 
             for grp in line_groups:
-                if not grp:
-                    continue
                 u = _build_pdf_unit(page_idx, f"Trang {page_idx + 1}", grp)
                 if u:
                     page_units.append(u)
@@ -365,7 +498,7 @@ def _unit_to_html(unit: PdfUnit, translated: str, align: str = "left", tight: bo
         else:
             chunks.append(_span_html(unit.styles_by_id.get(cur), html.unescape(tok)))
 
-    line_h = "1.06" if tight else "1.12"
+    line_h = "1.08" if tight else "1.20"
     return (
         f'<div style="font-family: sans-serif; font-size: {base_sz:.1f}pt; '
         f'line-height: {line_h}; text-align: {align}; overflow-wrap: break-word; '
@@ -642,12 +775,49 @@ def translate_pdf(src, dst, target, translator: Translator, source_lang: str = "
 
                 spage = scratch_doc.new_page(width=page.rect.width, height=page.rect.height)
 
-                # 2. Chèn văn bản đã dịch giữ đúng vị trí gốc (căn giữa dọc/ngang chuẩn xác)
+                # 2. Tính trước tất cả vùng chèn và xử lý triệt để mọi khả năng va chạm nhau
+                planned: list[list] = []
                 for u, d in changed_units:
+                    rect, align, tight, v_align = _compute_safe_rect(u, page_units, h_lines, v_lines, page.rect)
+                    planned.append([u, d, rect, align, tight, v_align])
+
+                fixed_boxes = [pymupdf.Rect(u.bbox) for u in page_units if all(cu is not u for cu, _ in changed_units)]
+                for item in planned:
+                    u, _d, r, _a, _t, _va = item
+                    if u.rotate != 0:
+                        continue
+                    for fb in fixed_boxes:
+                        if min(r.x1, fb.x1) > max(r.x0, fb.x0) + 1.0 and min(r.y1, fb.y1) > max(r.y0, fb.y0) + 1.0:
+                            if u.bbox[2] <= fb.x0 + 2.0:
+                                r.x1 = max(r.x0 + 6.0, min(r.x1, fb.x0 - 1.5))
+                            elif u.bbox[3] <= fb.y0 + 2.0:
+                                r.y1 = max(r.y0 + 6.0, min(r.y1, fb.y0 - 1.5))
+
+                planned.sort(key=lambda it: (it[2].y0, it[2].x0))
+                for i in range(len(planned)):
+                    ui, _di, ri, _ai, _ti, _vai = planned[i]
+                    if ui.rotate != 0:
+                        continue
+                    for j in range(i + 1, len(planned)):
+                        uj, _dj, rj, _aj, _tj, _vaj = planned[j]
+                        if uj.rotate != 0:
+                            continue
+                        if min(ri.x1, rj.x1) > max(ri.x0, rj.x0) + 1.5 and min(ri.y1, rj.y1) > max(ri.y0, rj.y0) + 1.5:
+                            same_row = min(ui.bbox[3], uj.bbox[3]) > max(ui.bbox[1], uj.bbox[1]) - 2.0
+                            if same_row and uj.bbox[0] >= ui.bbox[0]:
+                                split_x = max(ri.x0 + 6.0, min(rj.x1 - 6.0, (ui.bbox[2] + uj.bbox[0]) * 0.5))
+                                ri.x1 = min(ri.x1, split_x - 1.0)
+                                rj.x0 = max(rj.x0, split_x + 1.0)
+                            elif uj.bbox[1] >= ui.bbox[1]:
+                                ri.y1 = max(ri.y0 + 6.0, min(ri.y1, uj.bbox[1] - 1.5))
+                                if min(ri.y1, rj.y1) > max(ri.y0, rj.y0) + 1.5:
+                                    rj.y0 = min(rj.y1 - 6.0, max(rj.y0, ri.y1 + 1.0))
+
+                # 3. Chèn văn bản đã dịch giữ đúng vị trí gốc (căn giữa dọc/ngang chuẩn xác)
+                for u, d, rect, align, tight, v_align in planned:
                     if u.tagged in degraded:
                         rep.degraded.append(f"{u.where}: “{u.plain[:25].strip()}…”")
 
-                    rect, align, tight, v_align = _compute_safe_rect(u, page_units, h_lines, v_lines, page.rect)
                     html_str = _unit_to_html(u, d, align=align, tight=tight)
 
                     if v_align in ("middle", "bottom"):
